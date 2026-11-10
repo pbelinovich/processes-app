@@ -1,23 +1,26 @@
 import AppKit
 
 /// Table rows preserve process identity across refreshes; actions capture the represented item.
+@MainActor
 enum ProcessRow {
     case leftovers(Int)
-    case session(AgentSession)
+    case session(AgentSession, Bool, Bool)
     case process(AttributedProcess, AgentSession?)
+    case details(AttributedProcess, Bool)
     case message(String)
-    case other(String, Bool)
+    case other(Int, Bool)
+    case gap
 
     var height: CGFloat {
         switch self {
-        case .leftovers: 38
-        case .session: 32
-        case .process(_, let session): session?.state == .ended || isIdle(session?.state) ? 48 : 28
-        case .message: 30
-        case .other: 40
+        case .leftovers: 30
+        case .session, .other: 28
+        case .process(_, let session): session?.state == .ended || isIdle(session?.state) ? 38 : 24
+        case .details(let item, let full): InlineDetailsCell.height(for: item, fullCommand: full)
+        case .message: 26
+        case .gap: 4
         }
     }
-
     private func isIdle(_ state: SessionState?) -> Bool {
         if case .idle = state { return true }
         return false
@@ -43,7 +46,12 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     private var statusMessage: String?
     private var stopErrors: String?
     private var stoppingPIDs: Set<pid_t> = []
-    private let details = NSPopover()
+    private var expandedSessions: [String: Bool] = [:]
+    private var searchDisclosure: [String: Bool] = [:]
+    private var searchOtherExpanded: Bool?
+    private var expandedProcess: pid_t?
+    private var fullCommand = false
+    var onContentSize: ((NSSize) -> Void)?
     var onSnapshot: ((AttributedSnapshot) -> Void)?
 
     override func loadView() {
@@ -57,19 +65,23 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         search.delegate = self
         search.sendsSearchStringImmediately = true
         let refresh = NSButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Обновить")!, target: self, action: #selector(refreshNow))
-        refresh.bezelStyle = .inline
+        refresh.bezelStyle = .rounded
+        refresh.controlSize = .regular
         refresh.toolTip = "Обновить сейчас"
         let quit = NSButton(title: "Выйти", target: NSApp, action: #selector(NSApplication.terminate(_:)))
-        quit.bezelStyle = .inline
+        quit.bezelStyle = .rounded
+        quit.controlSize = .small
         quit.font = .systemFont(ofSize: 11)
         status.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let column = NSTableColumn(identifier: .init("process"))
-        column.width = 536
+        column.width = 560
         table.addTableColumn(column)
         table.headerView = nil
+        table.style = .plain
+        table.rowSizeStyle = .custom
         table.intercellSpacing = .zero
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .none
@@ -81,6 +93,8 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         scroll.documentView = table
         let separator = NSBox()
         separator.boxType = .separator
@@ -89,28 +103,32 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             view.addSubview(child)
         }
         NSLayoutConstraint.activate([
-            tabs.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
-            tabs.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            tabs.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            search.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 12),
+            tabs.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
+            tabs.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            tabs.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            tabs.heightAnchor.constraint(equalToConstant: 28),
+            search.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 8),
             search.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
             search.trailingAnchor.constraint(equalTo: refresh.leadingAnchor, constant: -8),
             search.heightAnchor.constraint(equalToConstant: 28),
             refresh.trailingAnchor.constraint(equalTo: tabs.trailingAnchor),
             refresh.centerYAnchor.constraint(equalTo: search.centerYAnchor),
-            refresh.widthAnchor.constraint(equalToConstant: 24),
+            refresh.widthAnchor.constraint(equalToConstant: 28),
+            refresh.heightAnchor.constraint(equalToConstant: 28),
             scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 10),
-            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
-            scroll.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -5),
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: separator.topAnchor),
             separator.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -34),
+            separator.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -35),
             status.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
             status.centerYAnchor.constraint(equalTo: quit.centerYAnchor),
             status.trailingAnchor.constraint(lessThanOrEqualTo: quit.leadingAnchor, constant: -8),
             quit.trailingAnchor.constraint(equalTo: tabs.trailingAnchor),
-            quit.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -9)
+            quit.centerYAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
+            quit.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
+            quit.heightAnchor.constraint(equalToConstant: 24)
         ])
         rebuildRows()
     }
@@ -181,11 +199,12 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     func setQuery(_ value: String) {
+        if search.stringValue != value { searchDisclosure = [:]; searchOtherExpanded = nil }
         search.stringValue = value
         rebuildRows()
     }
 
-    func controlTextDidChange(_ obj: Notification) { rebuildRows() }
+    func controlTextDidChange(_ obj: Notification) { searchDisclosure = [:]; searchOtherExpanded = nil; rebuildRows() }
     @objc private func filtersChanged() { rebuildRows() }
 
     private func matches(_ entry: ProcessEntry, project: String = "") -> Bool {
@@ -201,39 +220,53 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
 
     private func rebuildRows() {
         rows = []
+        let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        func appendProcess(_ item: AttributedProcess, session: AgentSession?) {
+            rows.append(.process(item, session))
+            if expandedProcess == item.id { rows.append(.details(item, fullCommand)) }
+        }
+        func appendSession(_ session: AgentSession, leftover: Bool) {
+            let items = matchingProcesses(session)
+            let projectMatches = (session.projectPath + " " + session.kind.displayName).localizedCaseInsensitiveContains(query)
+            guard query.isEmpty || !items.isEmpty || projectMatches else { return }
+            if case .session = rows.last { rows.append(.gap) }
+            else if !rows.isEmpty, case .leftovers = rows.last {} else if !rows.isEmpty { rows.append(.gap) }
+            let expanded = query.isEmpty ? (expandedSessions[session.id] ?? (leftover || session.uiPriority == 2)) : (searchDisclosure[session.id] ?? true)
+            rows.append(.session(session, expanded, leftover))
+            if expanded {
+                let ordered = items.enumerated().sorted {
+                    let l = $0.element.role == .mcp, r = $1.element.role == .mcp
+                    return l == r ? $0.offset < $1.offset : !l
+                }.map(\.element)
+                for item in ordered { appendProcess(item, session: session) }
+            }
+        }
         if tabs.selectedSegment == 1 {
-            rows = snapshot.all.filter { matches($0) }.sorted {
-                let left = $0.residentBytes ?? 0, right = $1.residentBytes ?? 0
-                return left == right ? $0.pid < $1.pid : left > right
-            }.map { .process(AttributedProcess(entry: $0, role: $0.listeningPorts.isEmpty ? .other : .server, depth: 0, tree: [$0]), nil) }
+            for entry in snapshot.all.filter({ matches($0) }).sorted(by: {
+                let l = $0.residentBytes ?? 0, r = $1.residentBytes ?? 0
+                return l == r ? $0.pid < $1.pid : l > r
+            }) {
+                appendProcess(AttributedProcess(entry: entry, role: entry.listeningPorts.isEmpty ? .other : .server, depth: 0, tree: [entry]), session: nil)
+            }
         } else {
-            let leftovers = snapshot.leftoverSessions.flatMap { session in matchingProcesses(session).map { ProcessRow.process($0, session) } }
-            if !leftovers.isEmpty {
-                rows.append(.leftovers(leftovers.count))
-                rows += leftovers
-            } else if search.stringValue.isEmpty && snapshot.leftoverCount == 0 {
+            let count = snapshot.leftoverSessions.reduce(0) { $0 + matchingProcesses($1).count }
+            if count > 0 {
+                rows.append(.leftovers(count))
+                for session in snapshot.leftoverSessions where !matchingProcesses(session).isEmpty { appendSession(session, leftover: true) }
+            } else if query.isEmpty && snapshot.leftoverCount == 0 {
                 rows.append(.message("Агенты ничего не оставили ✓"))
             }
-            let orderedSessions = snapshot.liveSessions.enumerated().sorted {
-                let left = $0.element.uiPriority, right = $1.element.uiPriority
-                return left == right ? $0.offset < $1.offset : left > right
+            let ordered = snapshot.liveSessions.enumerated().sorted {
+                let l = $0.element.uiPriority, r = $1.element.uiPriority
+                return l == r ? $0.offset < $1.offset : l > r
             }.map(\.element)
-            for session in orderedSessions {
-                let items = matchingProcesses(session)
-                let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                let projectMatches = (session.projectPath + " " + session.kind.displayName).localizedCaseInsensitiveContains(query)
-                guard query.isEmpty || !items.isEmpty || projectMatches else { continue }
-                rows.append(.session(session))
-                // MCP stays discoverable through explicit search and session details.
-                let visible = query.isEmpty ? items.filter { $0.role != .mcp } : items
-                rows += visible.map { .process($0, session) }
-            }
+            for session in ordered { appendSession(session, leftover: false) }
             let other = snapshot.otherServers.filter { matches($0.entry) }
             if !other.isEmpty {
-                let expanded = otherExpanded || !search.stringValue.isEmpty
-                let summary = other.map { $0.entry.displayName + $0.entry.listeningPorts.map { " :" + $0 }.joined(separator: ",") }.joined(separator: ", ")
-                rows.append(.other(summary, expanded))
-                if expanded { rows += other.map { .process($0, nil) } }
+                if !rows.isEmpty { rows.append(.gap) }
+                let expanded = query.isEmpty ? otherExpanded : (searchOtherExpanded ?? true)
+                rows.append(.other(other.count, expanded))
+                if expanded { for item in other { appendProcess(item, session: nil) } }
             }
         }
         if rows.isEmpty { rows = [.message("Ничего не найдено")] }
@@ -242,6 +275,13 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             : "Сессий: \(snapshot.liveSessions.count) · осталось: \(snapshot.leftoverCount) · каждые 3 с")
         status.toolTip = stopErrors ?? status.stringValue
         table.reloadData()
+        let height = min(640, max(320, 122 + rows.reduce(CGFloat.zero) { $0 + $1.height }))
+        let size = NSSize(width: 560, height: height)
+        if preferredContentSize != size {
+            preferredContentSize = size
+            view.setFrameSize(size)
+            onContentSize?(size)
+        }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
@@ -252,41 +292,49 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         case .process(let item, let session):
             let cell = tableView.makeView(withIdentifier: .init("process"), owner: self) as? ProcessCell ?? ProcessCell()
             cell.identifier = .init("process")
-            cell.configure(item, session: session, showPID: tabs.selectedSegment == 1, stopping: stoppingPIDs.contains(item.id))
+            cell.configure(item, session: session, stopping: stoppingPIDs.contains(item.id))
             cell.onStop = { [weak self] in self?.stopItems([item]) }
+            cell.onDetails = { [weak self] in self?.toggleProcess(item.id) }
+            return cell
+        case .details(let item, let full):
+            let cell = InlineDetailsCell(item: item, fullCommand: full)
+            cell.onStop = { [weak self] in self?.stopItems([item]) }
+            cell.onShowAll = { [weak self] in self?.fullCommand.toggle(); self?.rebuildRows() }
             return cell
         case .leftovers(let count):
-            return UISectionCell(title: "⚠ Остались после агентов (\(count))", accent: true, buttonTitle: "Остановить все") { [weak self] in self?.confirmStopAll() }
-        case .session(let session):
-            return SessionHeaderCell(session: session)
+            return UISectionCell(title: "⚠ Остались после агентов (\(count))", buttonTitle: "Остановить все") { [weak self] in self?.confirmStopAll() }
+        case .session(let session, let expanded, let leftover):
+            return SessionHeaderCell(session: session, expanded: expanded, leftover: leftover)
         case .message(let text):
-            return UISectionCell(title: text, secondary: true)
-        case .other(let summary, let expanded):
-            return UISectionCell(title: "\(expanded ? "▾" : "▸") Прочие серверы (не от агентов)", subtitle: summary, secondary: true)
+            return UISectionCell(title: text, success: text.contains("✓"))
+        case .other(let count, let expanded):
+            return SessionHeaderCell(otherCount: count, expanded: expanded)
+        case .gap: return NSView()
         }
     }
 
-    @objc private func rowClicked() {
-        guard rows.indices.contains(table.clickedRow) else { return }
-        switch rows[table.clickedRow] {
-        case .other:
-            otherExpanded.toggle()
+    @objc private func rowClicked() { activateRow(table.clickedRow) }
+
+    func activateRow(_ index: Int) {
+        guard rows.indices.contains(index) else { return }
+        switch rows[index] {
+        case .other(_, let expanded):
+            if search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { otherExpanded = !expanded }
+            else { searchOtherExpanded = !expanded }
             rebuildRows()
-        case .session(let session):
-            guard let cell = table.view(atColumn: 0, row: table.clickedRow, makeIfNecessary: true) else { return }
-            showPopover(SessionDetailsController(session: session), from: cell)
-        case .process(let item, _):
-            guard let cell = table.view(atColumn: 0, row: table.clickedRow, makeIfNecessary: true) else { return }
-            showPopover(ProcessDetailsController(item: item), from: cell)
+        case .session(let session, let expanded, _):
+            if search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { expandedSessions[session.id] = !expanded }
+            else { searchDisclosure[session.id] = !expanded }
+            rebuildRows()
+        case .process(let item, _): toggleProcess(item.id)
         default: break
         }
     }
 
-    private func showPopover(_ controller: NSViewController, from cell: NSView) {
-        details.close()
-        details.behavior = .transient
-        details.contentViewController = controller
-        details.show(relativeTo: cell.bounds, of: cell, preferredEdge: .maxX)
+    func toggleProcess(_ pid: pid_t) {
+        expandedProcess = expandedProcess == pid ? nil : pid
+        fullCommand = false
+        rebuildRows()
     }
 
     private func confirmStopAll() {

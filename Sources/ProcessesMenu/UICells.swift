@@ -1,176 +1,11 @@
 import AppKit
 
 @MainActor
-final class UISectionCell: NSTableCellView {
-    private var handler: (() -> Void)?
-
-    init(title: String, subtitle: String? = nil, accent: Bool = false, secondary: Bool = false, buttonTitle: String? = nil, handler: (() -> Void)? = nil) {
-        super.init(frame: .zero)
-        self.handler = handler
-        wantsLayer = true
-        layer?.cornerRadius = 7
-        if accent { layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.12).cgColor }
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: secondary ? 11 : 12, weight: secondary ? .regular : .semibold)
-        label.textColor = accent ? .systemOrange : secondary ? .secondaryLabelColor : .labelColor
-        label.lineBreakMode = .byTruncatingMiddle
-        label.toolTip = title
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-        let trailing: NSLayoutXAxisAnchor
-        if let buttonTitle {
-            let button = NSButton(title: buttonTitle, target: self, action: #selector(performAction))
-            button.bezelStyle = .inline
-            button.isBordered = false
-            button.font = .systemFont(ofSize: 11, weight: .medium)
-            button.contentTintColor = .systemOrange
-            button.attributedTitle = NSAttributedString(string: buttonTitle, attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.systemOrange])
-            button.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(button)
-            NSLayoutConstraint.activate([
-                button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-                button.centerYAnchor.constraint(equalTo: centerYAnchor),
-                button.widthAnchor.constraint(equalToConstant: 103)
-            ])
-            trailing = button.leadingAnchor
-        } else { trailing = trailingAnchor }
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: secondary ? 24 : 10),
-            label.trailingAnchor.constraint(equalTo: trailing, constant: -8)
-        ])
-        if let subtitle {
-            let detail = NSTextField(labelWithString: subtitle)
-            detail.font = .systemFont(ofSize: 10)
-            detail.textColor = .tertiaryLabelColor
-            detail.lineBreakMode = .byTruncatingTail
-            detail.toolTip = subtitle
-            detail.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(detail)
-            NSLayoutConstraint.activate([
-                label.topAnchor.constraint(equalTo: topAnchor, constant: 4),
-                detail.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-                detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-                detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2)
-            ])
-            setAccessibilityLabel(title + ": " + subtitle)
-        } else { label.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true }
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    @objc private func performAction() { handler?() }
-}
-
-@MainActor
-final class ProcessCell: NSTableCellView {
-    private let icon = NSImageView()
-    private let nameLabel = NSTextField(labelWithString: "")
-    private let metadata = NSTextField(labelWithString: "")
-    private let memoryLabel = NSTextField(labelWithString: "")
-    private let pidLabel = NSTextField(labelWithString: "")
-    private let portStack = NSStackView()
-    private let stop = NSButton(title: "Остановить", target: nil, action: nil)
+class HoverCell: NSTableCellView {
     private var tracking: NSTrackingArea?
-    private var nameCenter: NSLayoutConstraint!
-    private var metadataCenter: NSLayoutConstraint!
-    private var hoverOverride: Bool?
-    var onStop: (() -> Void)?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.cornerRadius = 5
-        nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        nameLabel.lineBreakMode = .byTruncatingMiddle
-        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        metadata.font = .systemFont(ofSize: 10)
-        metadata.textColor = .secondaryLabelColor
-        metadata.lineBreakMode = .byTruncatingMiddle
-        memoryLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        memoryLabel.textColor = .secondaryLabelColor
-        memoryLabel.alignment = .right
-        pidLabel.font = .monospacedDigitSystemFont(ofSize: 9, weight: .regular)
-        pidLabel.textColor = .tertiaryLabelColor
-        pidLabel.alignment = .right
-        portStack.orientation = .horizontal
-        portStack.spacing = 3
-        portStack.setContentCompressionResistancePriority(.required, for: .horizontal)
-        stop.bezelStyle = .inline
-        stop.isBordered = false
-        stop.font = .systemFont(ofSize: 10)
-        stop.contentTintColor = .systemRed
-        stop.target = self
-        stop.action = #selector(stopClicked)
-        stop.alphaValue = 0
-        for child in [icon, nameLabel, metadata, portStack, memoryLabel, pidLabel, stop] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(child)
-        }
-        nameCenter = nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
-        metadataCenter = metadata.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 11)
-        NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            icon.widthAnchor.constraint(equalToConstant: 14),
-            icon.heightAnchor.constraint(equalToConstant: 14),
-            icon.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            nameLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7),
-            nameLabel.trailingAnchor.constraint(equalTo: portStack.leadingAnchor, constant: -6),
-            nameCenter,
-            portStack.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            portStack.trailingAnchor.constraint(equalTo: pidLabel.leadingAnchor, constant: -5),
-            pidLabel.widthAnchor.constraint(equalToConstant: 0).withPriority(749),
-            pidLabel.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            pidLabel.trailingAnchor.constraint(equalTo: memoryLabel.leadingAnchor, constant: -6),
-            memoryLabel.widthAnchor.constraint(equalToConstant: 56),
-            memoryLabel.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            memoryLabel.trailingAnchor.constraint(equalTo: stop.leadingAnchor, constant: -5),
-            stop.widthAnchor.constraint(equalToConstant: 80),
-            stop.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
-            stop.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            metadata.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
-            metadata.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            metadataCenter
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func configure(_ item: AttributedProcess, session: AgentSession?, showPID: Bool, stopping: Bool) {
-        let entry = item.entry
-        nameLabel.stringValue = entry.displayName
-        memoryLabel.stringValue = entry.memoryLabel
-        pidLabel.stringValue = showPID ? "\(entry.pid)" : ""
-        pidLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let isLeftover: Bool
-        switch session?.state {
-        case .ended, .idle: isLeftover = true
-        default: isLeftover = false
-        }
-        nameCenter.constant = isLeftover ? -9 : 0
-        metadata.isHidden = !isLeftover
-        if let session, isLeftover {
-            let age = ProcessEntry.durationLabel(seconds: max(0, Int(Date().timeIntervalSince1970) - Int(entry.startedSeconds)))
-            metadata.stringValue = "\(session.uiProjectName) · \(session.kind.displayName)\(session.state.uiSuffix) · \(age)"
-            metadata.toolTip = session.projectPath + "\n" + metadata.stringValue
-        }
-        let muted = item.role == .mcp && !isLeftover
-        nameLabel.textColor = muted ? .secondaryLabelColor : .labelColor
-        icon.contentTintColor = muted ? .secondaryLabelColor : isLeftover ? .systemOrange : .secondaryLabelColor
-        icon.image = NSImage(systemSymbolName: item.role.symbol, accessibilityDescription: item.role.accessibilityName)
-        portStack.arrangedSubviews.forEach { portStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        for port in entry.listeningPorts {
-            let button = PortButton(port: port)
-            portStack.addArrangedSubview(button)
-        }
-        stop.title = stopping ? "Остановка…" : "Остановить"
-        stop.isEnabled = !stopping && entry.canTerminate
-        stop.attributedTitle = NSAttributedString(string: stop.title, attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: stop.isEnabled ? NSColor.systemRed : NSColor.secondaryLabelColor])
-        stop.toolTip = entry.canTerminate ? "Остановить процесс и его дочерние задачи" : "Нет прав на остановку процесса"
-        stop.setAccessibilityLabel("Остановить \(entry.displayName), PID \(entry.pid)")
-        toolTip = "\(entry.displayName) · PID \(entry.pid) · PPID \(entry.parentPID)\n\(entry.workingDirectory)\n\(entry.command)\nНажмите для подробностей"
-        setAccessibilityLabel("\(entry.displayName), PID \(entry.pid), \(entry.memoryLabel)" + entry.listeningPorts.map { ", порт " + $0 }.joined())
-        updateHover()
-    }
-
+    private var forcedHover: Bool?
+    private(set) var hovered = false
+    override var isFlipped: Bool { true }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
@@ -179,29 +14,222 @@ final class ProcessCell: NSTableCellView {
         tracking = area
         updateHover()
     }
-
     private func updateHover() {
-        let hovered = hoverOverride ?? (window.map { bounds.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false)
-        // Alpha keeps the button in the accessibility tree and preserves the name/port layout.
-        stop.alphaValue = hovered ? 1 : 0
-        layer?.backgroundColor = hovered ? NSColor.quaternaryLabelColor.cgColor : NSColor.clear.cgColor
+        hovered = forcedHover ?? (window.map { bounds.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false)
+        hoverChanged()
+        needsDisplay = true
     }
-
+    func hoverChanged() {}
     override func mouseEntered(with event: NSEvent) { updateHover() }
     override func mouseExited(with event: NSEvent) { updateHover() }
-    @objc private func stopClicked() { onStop?() }
-
+    override func draw(_ dirtyRect: NSRect) {
+        if hovered {
+            NSColor.quaternaryLabelColor.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 0), xRadius: 6, yRadius: 6).fill()
+        }
+    }
     #if PROCESS_UI_CHECKS
-    func setHoveredForCheck(_ hovered: Bool) { hoverOverride = hovered; updateHover() }
+    func setHoveredForCheck(_ value: Bool) { forcedHover = value; updateHover() }
     #endif
 }
 
-private extension NSLayoutConstraint {
-    func withPriority(_ value: Float) -> NSLayoutConstraint { priority = .init(value); return self }
+@MainActor
+final class SessionHeaderCell: HoverCell {
+    let chevron = NSImageView()
+    let dot = NSView()
+    let titleLabel = NSTextField(labelWithString: "")
+    let mcpLabel = NSTextField(labelWithString: "")
+    private let dotColor: NSColor
+    private let expanded: Bool
+
+    init(session: AgentSession, expanded: Bool, leftover: Bool = false) {
+        self.expanded = expanded
+        dotColor = leftover ? .systemOrange : session.state == .active ? .systemGreen : .systemGray
+        super.init(frame: .zero)
+        let age = ProcessEntry.durationLabel(seconds: max(0, Int(Date().timeIntervalSince1970) - Int(session.startedSeconds)))
+        let text = NSMutableAttributedString(string: session.kind.displayName, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.labelColor])
+        text.append(NSAttributedString(string: " " + session.uiProjectName, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor]))
+        text.append(NSAttributedString(string: " · " + age + session.state.uiSuffix, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+        titleLabel.attributedStringValue = text
+        prepare(mcp: session.uiMCPProcesses, title: text.string)
+    }
+
+    init(otherCount: Int, expanded: Bool) {
+        self.expanded = expanded
+        dotColor = .systemGray
+        super.init(frame: .zero)
+        titleLabel.font = .systemFont(ofSize: 13)
+        titleLabel.stringValue = "Прочие серверы (\(otherCount))"
+        prepare(mcp: [], title: titleLabel.stringValue)
+    }
+
+    private func prepare(mcp: [AttributedProcess], title: String) {
+        chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: expanded ? "Свернуть" : "Раскрыть")
+        chevron.symbolConfiguration = .init(pointSize: 10, weight: .medium)
+        chevron.contentTintColor = .secondaryLabelColor
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        mcpLabel.font = .systemFont(ofSize: 11)
+        mcpLabel.textColor = .secondaryLabelColor
+        mcpLabel.stringValue = mcp.isEmpty ? "" : "MCP \(mcp.count)"
+        mcpLabel.alignment = .center
+        let names = mcp.map { "\($0.entry.displayName) · PID \($0.id)" }.joined(separator: "\n")
+        mcpLabel.toolTip = names.isEmpty ? nil : names
+        titleLabel.toolTip = title + (names.isEmpty ? "" : "\nMCP:\n" + names) + "\nНажмите, чтобы " + (expanded ? "свернуть" : "раскрыть")
+        setAccessibilityLabel(title + (mcp.isEmpty ? "" : ", MCP \(mcp.count)") + (expanded ? ", раскрыто" : ", свёрнуто"))
+        for child in [chevron, dot, titleLabel, mcpLabel] { addSubview(child) }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() {
+        super.layout()
+        chevron.frameCenterRotation = 0
+        chevron.frame = NSRect(x: 12, y: 9, width: 10, height: 10)
+        chevron.frameCenterRotation = expanded ? 90 : 0
+        dot.frame = NSRect(x: 28, y: 10.5, width: 7, height: 7)
+        let capsuleWidth: CGFloat = mcpLabel.stringValue.isEmpty ? 0 : ceil(mcpLabel.intrinsicContentSize.width) + 12
+        mcpLabel.frame = NSRect(x: bounds.width - 12 - capsuleWidth, y: 6, width: capsuleWidth, height: 16)
+        titleLabel.frame = NSRect(x: 42, y: 5, width: max(0, bounds.width - 54 - (capsuleWidth > 0 ? capsuleWidth + 8 : 0)), height: 19)
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        dotColor.setFill()
+        NSBezierPath(ovalIn: dot.frame).fill()
+        if !mcpLabel.stringValue.isEmpty {
+            NSColor.quaternaryLabelColor.setFill()
+            NSBezierPath(roundedRect: mcpLabel.frame.insetBy(dx: 0, dy: -2), xRadius: 6, yRadius: 6).fill()
+        }
+    }
 }
 
 @MainActor
-private final class PortButton: NSButton {
+final class UISectionCell: NSTableCellView {
+    private let label = NSTextField(labelWithString: "")
+    private let button: NSButton?
+    private let success: Bool
+    private var handler: (() -> Void)?
+    override var isFlipped: Bool { true }
+    init(title: String, success: Bool = false, buttonTitle: String? = nil, handler: (() -> Void)? = nil) {
+        self.success = success
+        self.handler = handler
+        button = buttonTitle.map { NSButton(title: $0, target: nil, action: nil) }
+        super.init(frame: .zero)
+        label.stringValue = title
+        label.font = .systemFont(ofSize: 11, weight: success ? .regular : .semibold)
+        label.textColor = success ? .systemGreen : .systemOrange
+        label.lineBreakMode = .byTruncatingTail
+        addSubview(label)
+        if let button {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: 11)
+            button.target = self
+            button.action = #selector(performAction)
+            addSubview(button)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() {
+        super.layout()
+        let width = button.map { max(112, ceil($0.fittingSize.width)) } ?? 0
+        button?.frame = NSRect(x: bounds.width - 12 - width, y: (bounds.height - 24) / 2, width: width, height: 24)
+        label.frame = NSRect(x: 24, y: (bounds.height - 16) / 2, width: bounds.width - 48 - (width > 0 ? width + 8 : 0), height: 16)
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        (success ? NSColor.systemGreen : NSColor.systemOrange).withAlphaComponent(0.10).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 12, dy: 0), xRadius: 6, yRadius: 6).fill()
+    }
+    @objc private func performAction() { handler?() }
+}
+
+@MainActor
+final class ProcessCell: HoverCell {
+    let icon = NSImageView()
+    let nameLabel = NSTextField(labelWithString: "")
+    let memoryLabel = NSTextField(labelWithString: "")
+    let stop = NSButton(title: "Остановить", target: nil, action: nil)
+    private let metadata = NSTextField(labelWithString: "")
+    private var ports: [NSButton] = []
+    private var leftover = false
+    var onStop: (() -> Void)?
+    var onDetails: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        nameLabel.font = .systemFont(ofSize: 13)
+        nameLabel.lineBreakMode = .byTruncatingMiddle
+        metadata.font = .systemFont(ofSize: 11)
+        metadata.textColor = .secondaryLabelColor
+        metadata.lineBreakMode = .byTruncatingMiddle
+        memoryLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        memoryLabel.textColor = .secondaryLabelColor
+        memoryLabel.alignment = .right
+        stop.bezelStyle = .rounded
+        stop.controlSize = .mini
+        stop.font = .systemFont(ofSize: 11)
+        stop.target = self
+        stop.action = #selector(stopClicked)
+        for child in [icon, nameLabel, metadata, memoryLabel, stop] { addSubview(child) }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func configure(_ item: AttributedProcess, session: AgentSession?, stopping: Bool) {
+        let entry = item.entry
+        switch session?.state { case .ended, .idle: leftover = true; default: leftover = false }
+        nameLabel.stringValue = entry.displayName
+        nameLabel.textColor = item.role == .mcp && !leftover ? .secondaryLabelColor : .labelColor
+        memoryLabel.stringValue = entry.memoryLabel
+        icon.image = NSImage(systemSymbolName: item.role.symbol, accessibilityDescription: nil)
+        icon.contentTintColor = leftover ? .systemOrange : .secondaryLabelColor
+        metadata.isHidden = !leftover
+        if let session, leftover {
+            metadata.stringValue = "\(session.uiProjectName) · \(session.kind.displayName)\(session.state.uiSuffix) · \(entry.ageLabel)"
+            metadata.toolTip = metadata.stringValue
+        }
+        ports.forEach { $0.removeFromSuperview() }
+        ports = entry.listeningPorts.prefix(3).map { PortButton(port: $0) }
+        if entry.listeningPorts.count > 3 {
+            let more = NSButton(title: "+\(entry.listeningPorts.count - 3)", target: self, action: #selector(detailsClicked))
+            more.isBordered = false
+            more.font = .systemFont(ofSize: 12)
+            more.toolTip = entry.listeningPorts.map { ":" + $0 }.joined(separator: ", ")
+            ports.append(more)
+        }
+        ports.forEach { addSubview($0) }
+        stop.title = stopping ? "Остановка…" : "Остановить"
+        stop.isEnabled = !stopping && entry.canTerminate
+        stop.attributedTitle = NSAttributedString(string: stop.title, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: stop.isEnabled ? NSColor.systemRed : NSColor.secondaryLabelColor])
+        stop.setAccessibilityLabel("Остановить \(entry.displayName), PID \(entry.pid)")
+        toolTip = "\(entry.displayName) · PID \(entry.pid)\n\(entry.command)\nНажмите, чтобы раскрыть подробности"
+        hoverChanged()
+        needsLayout = true
+    }
+    override func layout() {
+        super.layout()
+        let y: CGFloat = leftover ? 1 : 2
+        icon.frame = NSRect(x: 42, y: y + 3, width: 14, height: 14)
+        let portWidth = ports.reduce(CGFloat.zero) { $0 + ceil($1.intrinsicContentSize.width) + 4 }
+        let available = bounds.width - 12 - 92 - 8 - 62
+        let naturalWidth = ceil((nameLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width) + 4
+        let nameWidth = max(30, min(naturalWidth, available - portWidth - (ports.isEmpty ? 0 : 6)))
+        nameLabel.frame = NSRect(x: 62, y: y, width: nameWidth, height: 20)
+        var x = nameLabel.frame.maxX + 6
+        for port in ports {
+            let width = ceil(port.intrinsicContentSize.width)
+            port.frame = NSRect(x: x, y: y - 1, width: width, height: 22)
+            x += width + 4
+        }
+        memoryLabel.frame = NSRect(x: bounds.width - 12 - 92, y: y + 1, width: 92, height: 18)
+        stop.frame = NSRect(x: bounds.width - 12 - 92, y: y - 1, width: 92, height: 23)
+        metadata.frame = NSRect(x: 62, y: 21, width: max(0, bounds.width - 74), height: 16)
+    }
+    override func hoverChanged() {
+        stop.isHidden = !hovered
+        memoryLabel.isHidden = hovered
+    }
+    @objc private func stopClicked() { onStop?() }
+    @objc private func detailsClicked() { onDetails?() }
+}
+
+@MainActor
+final class PortButton: NSButton {
     let port: String
     init(port: String) {
         self.port = port
@@ -209,17 +237,16 @@ private final class PortButton: NSButton {
         title = ":" + port
         bezelStyle = .inline
         isBordered = false
-        font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        font = .systemFont(ofSize: 12)
         contentTintColor = .linkColor
         target = self
         action = #selector(openPort)
         toolTip = "Открыть http://localhost:\(port)"
-        setAccessibilityLabel("Открыть localhost, порт \(port)")
-        setContentCompressionResistancePriority(.required, for: .horizontal)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    @objc private func openPort() {
-        guard let number = Int(port), (1...65535).contains(number), let url = URL(string: "http://localhost:\(number)") else { return }
+    @objc private func openPort() { Self.open(port) }
+    static func open(_ port: String) {
+        guard let value = Int(port), (1...65535).contains(value), let url = URL(string: "http://localhost:\(value)") else { return }
         NSWorkspace.shared.open(url)
     }
 }
@@ -234,74 +261,5 @@ private extension ProcessRole {
         case .helper: "gearshape.2"
         case .other: "app.dashed"
         }
-    }
-    var accessibilityName: String {
-        switch self {
-        case .server: "Сервер"
-        case .browser: "Браузер"
-        case .mcp: "MCP"
-        case .agent: "Агент"
-        case .helper: "Помощник"
-        case .other: "Процесс"
-        }
-    }
-}
-
-@MainActor
-final class SessionHeaderCell: NSTableCellView {
-    let titleLabel = NSTextField(labelWithString: "")
-    let mcpLabel = NSTextField(labelWithString: "")
-
-    init(session: AgentSession) {
-        super.init(frame: .zero)
-        let dot = SessionStateDot(state: session.state)
-        let age = ProcessEntry.durationLabel(seconds: max(0, Int(Date().timeIntervalSince1970) - Int(session.startedSeconds)))
-        titleLabel.stringValue = "\(session.kind.displayName) · \(session.uiProjectName) · \(age)" + session.state.uiSuffix
-        titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        titleLabel.lineBreakMode = .byTruncatingMiddle
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let mcp = session.uiMCPProcesses
-        mcpLabel.stringValue = mcp.isEmpty ? "" : "· MCP \(mcp.count)"
-        mcpLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        mcpLabel.textColor = .secondaryLabelColor
-        mcpLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let mcpNames = mcp.map { "\($0.entry.displayName) · PID \($0.id)" }.joined(separator: "\n")
-        mcpLabel.toolTip = mcp.isEmpty ? nil : "MCP (\(mcp.count)):\n" + mcpNames
-        let hint = titleLabel.stringValue + "\n" + (session.projectPath.isEmpty ? "Проект неизвестен" : session.projectPath)
-            + (mcp.isEmpty ? "" : "\nMCP:\n" + mcpNames) + "\nНажмите для подробностей сессии"
-        titleLabel.toolTip = hint
-        toolTip = hint
-        setAccessibilityLabel(titleLabel.stringValue + (mcp.isEmpty ? "" : ", MCP \(mcp.count): " + mcpNames))
-        for child in [dot, titleLabel, mcpLabel] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(child)
-        }
-        NSLayoutConstraint.activate([
-            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-            dot.widthAnchor.constraint(equalToConstant: 7),
-            dot.heightAnchor.constraint(equalToConstant: 7),
-            titleLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 7),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: mcpLabel.leadingAnchor, constant: -8),
-            mcpLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            mcpLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-}
-
-@MainActor
-private final class SessionStateDot: NSView {
-    private let state: SessionState
-    init(state: SessionState) {
-        self.state = state
-        super.init(frame: .zero)
-        setAccessibilityLabel(state == .active ? "Активна" : "Неактивна")
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func draw(_ dirtyRect: NSRect) {
-        (state == .active ? NSColor.systemGreen : NSColor.systemGray).setFill()
-        NSBezierPath(ovalIn: bounds).fill()
     }
 }

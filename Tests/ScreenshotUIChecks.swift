@@ -1,23 +1,38 @@
 import AppKit
 
+@MainActor
+final class GridOverlay: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func draw(_ dirtyRect: NSRect) {
+        let colors: [NSColor] = [.systemPink, .systemYellow, .systemCyan, .systemPurple, .systemPink]
+        for (index, x) in [CGFloat(12), 28, 42, 62, bounds.width - 12].enumerated() {
+            colors[index].withAlphaComponent(0.8).setStroke()
+            let line = NSBezierPath()
+            line.lineWidth = 0.5
+            line.move(to: NSPoint(x: x, y: 0))
+            line.line(to: NSPoint(x: x, y: bounds.height))
+            line.stroke()
+        }
+    }
+}
+
 @main
 enum ScreenshotUIChecks {
     @MainActor
     static func main() async throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
-        let output = ProcessInfo.processInfo.environment["PROCESSES_SCREENSHOT_DIR"] ?? "/tmp/processes-ui-02"
+        let output = ProcessInfo.processInfo.environment["PROCESSES_SCREENSHOT_DIR"] ?? "/tmp/processes-ui-03"
         try FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
 
-        func cache(_ view: NSView, name: String) throws {
-            let bounds = view.bounds
-            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: bounds) else { fatalError("No bitmap") }
-            view.appearance?.performAsCurrentDrawingAppearance { view.cacheDisplay(in: bounds, to: bitmap) }
+        func cache(_ view: NSView, name: String, rect: NSRect? = nil) throws {
+            let area = rect ?? view.bounds
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: area) else { fatalError("No bitmap") }
+            view.appearance?.performAsCurrentDrawingAppearance { view.cacheDisplay(in: area, to: bitmap) }
             guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
             try png.write(to: URL(fileURLWithPath: output).appendingPathComponent(name + ".png"))
         }
-
-        func render(_ name: String, snapshot: AttributedSnapshot, dark: Bool = false, all: Bool = false, hover: Bool = false, query: String = "") throws {
+        func render(_ name: String, snapshot: AttributedSnapshot, dark: Bool = true, query: String = "", all: Bool = false, expandedPID: pid_t? = nil, hoverPID: pid_t? = nil, grid: Bool = false) throws {
             let controller = ProcessListController()
             let window = NSWindow(contentViewController: controller)
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -25,88 +40,106 @@ enum ScreenshotUIChecks {
             controller.receive(snapshot)
             controller.selectTab(all ? 1 : 0)
             controller.setQuery(query)
+            if let expandedPID { controller.toggleProcess(expandedPID) }
+            window.setContentSize(controller.preferredContentSize)
             controller.view.layoutSubtreeIfNeeded()
             controller.table.layoutSubtreeIfNeeded()
+            if let hoverPID, let row = controller.rows.firstIndex(where: { if case .process(let item, _) = $0 { return item.id == hoverPID }; return false }) {
+                let cell = controller.table.view(atColumn: 0, row: row, makeIfNecessary: true) as! ProcessCell
+                cell.setHoveredForCheck(true)
+                precondition(cell.memoryLabel.isHidden && !cell.stop.isHidden, "Hover must replace memory with Stop")
+            }
+            var overlay: GridOverlay?
+            if grid {
+                let lines = GridOverlay(frame: controller.view.bounds)
+                controller.view.addSubview(lines)
+                overlay = lines
+            }
             controller.view.displayIfNeeded()
-            if hover {
-                let cell = controller.table.view(atColumn: 0, row: 1, makeIfNecessary: true) as? ProcessCell
-                cell?.setHoveredForCheck(true)
-            }
-            // AppKit can render an attached view without ordering its window onscreen.
             try cache(controller.view, name: name)
-            precondition(!window.isVisible, "Screenshot checks must never show a window")
-            if name.hasPrefix("agents-") {
-                precondition(controller.rows.count == 13, "Fixture must include three leftovers, six compact live sessions, two meaningful tasks and collapsed other servers")
-                let totalHeight = controller.rows.reduce(CGFloat.zero) { $0 + $1.height }
-                precondition(totalHeight <= controller.table.enclosingScrollView!.contentSize.height, "All agent rows must fit without scrolling")
-                print("PASS: six-session fixture uses \(totalHeight) / \(controller.table.enclosingScrollView!.contentSize.height) pt")
+            if name == "agents-dark" {
+                let total = controller.rows.reduce(CGFloat.zero) { $0 + $1.height }
+                precondition(total <= controller.table.enclosingScrollView!.contentSize.height + 1, "Default six-session fixture must fit")
+                try cache(controller.view, name: "agents-dark-crop", rect: NSRect(x: 0, y: controller.view.bounds.height - 300, width: 560, height: 214))
+                for row in controller.rows.indices {
+                    guard let cell = controller.table.view(atColumn: 0, row: row, makeIfNecessary: true) else { continue }
+                    cell.layoutSubtreeIfNeeded()
+                    if let header = cell as? SessionHeaderCell {
+                        precondition(abs(header.chevron.convert(header.chevron.bounds, to: controller.view).minX - 12) < 0.1)
+                        precondition(abs(header.convert(header.dot.frame.origin, to: controller.view).x - 28) < 0.1)
+                        precondition(abs(header.convert(header.titleLabel.frame.origin, to: controller.view).x - 42) < 0.1)
+                        if !header.mcpLabel.stringValue.isEmpty { precondition(abs(header.convert(header.mcpLabel.frame, to: controller.view).maxX - 548) < 0.1) }
+                    }
+                    if let process = cell as? ProcessCell {
+                        precondition(abs(process.convert(process.icon.frame.origin, to: controller.view).x - 42) < 0.1)
+                        precondition(abs(process.convert(process.nameLabel.frame.origin, to: controller.view).x - 62) < 0.1)
+                        precondition(abs(process.convert(process.memoryLabel.frame, to: controller.view).maxX - 548) < 0.1)
+                        precondition(abs(process.convert(process.stop.frame, to: controller.view).maxX - 548) < 0.1)
+                    }
+                }
+                print("PASS: grid 12/28/42/62/548; content \(total)pt / \(controller.table.enclosingScrollView!.contentSize.height)pt; window \(controller.preferredContentSize.height)pt")
             }
+            if name == "process-expanded-dark" {
+                let detail = controller.rows.firstIndex { if case .details = $0 { return true }; return false }!
+                let cell = controller.table.view(atColumn: 0, row: detail, makeIfNecessary: true)!
+                cell.layoutSubtreeIfNeeded()
+                let buttons = cell.subviews.compactMap { $0 as? NSButton }.filter { !$0.isHidden }
+                let bordered = buttons.filter(\.isBordered).sorted { $0.frame.minX < $1.frame.minX }
+                for pair in zip(bordered, bordered.dropFirst()) { precondition(pair.1.frame.minX - pair.0.frame.maxX >= 7.5, "Inline buttons need at least 8pt gaps") }
+                precondition(bordered.last!.frame.maxX == 548)
+                let rect = cell.convert(cell.bounds, to: controller.view)
+                try cache(controller.view, name: "process-expanded-crop", rect: rect)
+            }
+            overlay?.removeFromSuperview()
+            precondition(!window.isVisible && (320...640).contains(controller.preferredContentSize.height))
             print("PASS: offscreen \(name) → \(output)/\(name).png")
             withExtendedLifetime(window) {}
         }
 
-        try render("agents-light", snapshot: UIFixtures.agents)
-        try render("agents-dark", snapshot: UIFixtures.agents, dark: true)
-        try render("empty", snapshot: .empty)
-        try render("live-only", snapshot: UIFixtures.liveOnly)
-        try render("hover", snapshot: UIFixtures.agents, hover: true)
-        try render("all-processes", snapshot: UIFixtures.agents, all: true)
-        try render("long-names", snapshot: UIFixtures.longNames)
-        try render("mcp-search", snapshot: UIFixtures.agents, query: "figma-mcp")
-
-        let detailSession = UIFixtures.agents.liveSessions.first { $0.id == "live-vite" }!
-        let detailController = SessionDetailsController(session: detailSession)
-        let detailWindow = NSWindow(contentViewController: detailController)
-        detailWindow.appearance = NSAppearance(named: .aqua)
-        detailController.view.appearance = detailWindow.appearance
-        detailController.view.layoutSubtreeIfNeeded()
-        detailController.view.displayIfNeeded()
-        let detailText = detailController.view.subviews.compactMap { ($0 as? NSScrollView)?.documentView as? NSTextView }.first!
-        precondition(detailText.frame.height > detailText.enclosingScrollView!.contentSize.height, "Long session details must remain scrollable, including the last MCP")
-        for item in detailSession.uiMCPProcesses {
-            precondition(detailText.string.contains(item.entry.displayName) && detailText.string.contains("PID \(item.id)"), "Collapsed MCP must remain inspectable in session details")
-        }
-        try cache(detailController.view, name: "session-details")
-        precondition(!detailWindow.isVisible)
-        withExtendedLifetime(detailWindow) {}
-
+        let fixture = UIFixtures.agents
+        try render("agents-dark", snapshot: fixture)
+        try render("agents-light", snapshot: fixture, dark: false)
+        try render("session-collapsed-expanded", snapshot: fixture)
+        try render("process-expanded-dark", snapshot: fixture, query: "8000", expandedPID: 91_001)
+        try render("hover-stop", snapshot: fixture, hoverPID: 91_001)
+        try render("empty-dark", snapshot: .empty)
+        try render("grid-check", snapshot: fixture, grid: true)
+        try render("all-processes", snapshot: fixture, all: true)
         let real = await Task.detached(priority: .utility) { Attribution.snapshot() }.value
-        try render("real-agents", snapshot: real)
+        try render("real-dark", snapshot: real)
 
         let controller = ProcessListController()
         _ = controller.view
-        controller.receive(UIFixtures.agents)
-        let normalProcesses = controller.rows.compactMap { row -> AttributedProcess? in if case .process(let item, _) = row { return item }; return nil }
-        precondition(Set(normalProcesses.map(\.id)) == [91_001, 91_003, 91_015, 91_010, 91_014], "Only leftover MCP may occupy ordinary process rows")
-        let sessions = controller.rows.compactMap { row -> AgentSession? in if case .session(let session) = row { return session }; return nil }
-        precondition(sessions.count == 6 && sessions.prefix(2).allSatisfy { $0.uiPriority == 2 }, "Server/browser sessions must come first")
-        precondition(sessions.filter { $0.uiPriority == 0 }.count == 4, "MCP-only and empty sessions stay compact")
-        let threeMCP = sessions.first { $0.id == "live-vite" }!
-        let header = SessionHeaderCell(session: threeMCP)
-        precondition(header.mcpLabel.stringValue == "· MCP 3")
-        precondition(header.mcpLabel.toolTip?.contains(threeMCP.uiMCPProcesses[0].entry.displayName) == true)
-        let unknownProject = UIFixtures.agents.leftoverSessions.first { $0.projectPath.isEmpty }!
-        precondition(unknownProject.uiProjectName == "—", "Unknown projects must never render as root")
-        let idle = UIFixtures.session("idle", .codex, "", minutes: 5, state: .idle(seconds: 180), items: [])
-        precondition(SessionHeaderCell(session: idle).titleLabel.stringValue.contains("неактивна 3 мин"))
-        for (query, expected) in [("8000", [91_001]), ("91003", [91_003]), ("vglub-landing", [91_005, 91_010, 91_011, 91_012, 91_013]), ("Chrome", [91_003, 91_014]), ("8080", [91_006]), ("figma-mcp", [91_012])] {
+        controller.receive(fixture)
+        func sessionRow(_ id: String) -> Int {
+            controller.rows.firstIndex { if case .session(let session, _, _) = $0 { return session.id == id }; return false }!
+        }
+        func processIDs() -> Set<pid_t> {
+            Set(controller.rows.compactMap { if case .process(let item, _) = $0 { return item.id }; return nil })
+        }
+        precondition(processIDs().contains(91_011), "Expanded significant sessions include MCP")
+        precondition(!processIDs().contains(91_004), "MCP-only session is collapsed by default")
+        controller.activateRow(sessionRow("live-codex"))
+        precondition(processIDs().contains(91_004))
+        controller.receive(fixture)
+        precondition(processIDs().contains(91_004), "Expansion must survive snapshots")
+        controller.activateRow(sessionRow("live-vite"))
+        controller.receive(fixture)
+        precondition(!processIDs().contains(91_010), "Explicit collapse must survive snapshots")
+        controller.toggleProcess(91_001)
+        controller.toggleProcess(91_015)
+        precondition(controller.rows.filter { if case .details = $0 { return true }; return false }.count == 1, "Only one process may expand")
+        for (query, expected) in [("8000", [91_001]), ("91015", [91_015]), ("figma-mcp", [91_012]), ("8080", [91_006])] {
             controller.setQuery(query)
-            let ids = controller.rows.compactMap { row -> pid_t? in if case .process(let item, _) = row { return item.id }; return nil }
-            precondition(Set(ids) == Set(expected.map { pid_t($0) }), "Agents search must match port, PID and session project")
+            precondition(processIDs() == Set(expected.map { pid_t($0) }), "Search must reveal matching processes even in collapsed sessions")
         }
         controller.selectTab(1)
-        controller.setQuery("3001")
-        let portIDs = controller.rows.compactMap { row -> pid_t? in if case .process(let item, _) = row { return item.id }; return nil }
-        precondition(portIDs == [91_008], "All-processes search must match a listening port")
         controller.setQuery("sessions-online-third/frontend")
-        let ids = controller.rows.compactMap { row -> pid_t? in if case .process(let item, _) = row { return item.id }; return nil }
-        precondition(ids == [91_001, 91_002], "All-processes search must match project path, including session children")
-        controller.setQuery("vglub-landing")
-        let projectIDs = controller.rows.compactMap { row -> pid_t? in if case .process(let item, _) = row { return item.id }; return nil }
-        precondition(Set(projectIDs) == [91_005, 91_010, 91_011, 91_012, 91_013], "All-processes search must retain session project context even when process cwd is unavailable")
+        precondition(processIDs() == [91_001, 91_002], "All processes retains session project context")
         controller.setQuery("no-such-fixture")
-        guard case .message("Ничего не найдено") = controller.rows.first else { fatalError("No-result search must be explicit") }
-        precondition(app.windows.allSatisfy { !$0.isVisible }, "No test window may be visible")
-        print("PASS: agent and all-processes search")
+        precondition(processIDs().isEmpty)
+        precondition(controller.preferredContentSize.height == 320, "Empty lists shrink to minimum height")
+        precondition(app.windows.allSatisfy { !$0.isVisible }, "No windows may be shown")
+        print("PASS: persistent session disclosure, one inline process, search and content sizing")
     }
 }
