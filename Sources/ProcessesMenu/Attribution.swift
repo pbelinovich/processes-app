@@ -329,3 +329,9 @@ extension ProcessService {
         return StopResult(stopped: stopped.sorted(), killed: killed.sorted(), failed: failed)
     }
 }
+
+extension ProcessEntry {
+    /// Human name for the UI derived from the command (e.g. `vite`, `next dev`, `playwright-mcp`, `uvicorn app:main`).
+    /// STUB — implemented by the core worker; the UI worker must use it but not edit it.
+    var displayName: String { name }
+}
