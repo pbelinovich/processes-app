@@ -136,7 +136,7 @@ final class ProcessCell: NSTableCellView {
 
     func configure(_ item: AttributedProcess, session: AgentSession?, showPID: Bool, stopping: Bool) {
         let entry = item.entry
-        nameLabel.stringValue = entry.name
+        nameLabel.stringValue = entry.displayName
         memoryLabel.stringValue = entry.memoryLabel
         pidLabel.stringValue = showPID ? "\(entry.pid)" : ""
         pidLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -165,9 +165,9 @@ final class ProcessCell: NSTableCellView {
         stop.isEnabled = !stopping && entry.canTerminate
         stop.attributedTitle = NSAttributedString(string: stop.title, attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: stop.isEnabled ? NSColor.systemRed : NSColor.secondaryLabelColor])
         stop.toolTip = entry.canTerminate ? "Остановить процесс и его дочерние задачи" : "Нет прав на остановку процесса"
-        stop.setAccessibilityLabel("Остановить \(entry.name), PID \(entry.pid)")
-        toolTip = "\(entry.name) · PID \(entry.pid) · PPID \(entry.parentPID)\n\(entry.workingDirectory)\n\(entry.command)\nНажмите для подробностей"
-        setAccessibilityLabel("\(entry.name), PID \(entry.pid), \(entry.memoryLabel)" + entry.listeningPorts.map { ", порт " + $0 }.joined())
+        stop.setAccessibilityLabel("Остановить \(entry.displayName), PID \(entry.pid)")
+        toolTip = "\(entry.displayName) · PID \(entry.pid) · PPID \(entry.parentPID)\n\(entry.workingDirectory)\n\(entry.command)\nНажмите для подробностей"
+        setAccessibilityLabel("\(entry.displayName), PID \(entry.pid), \(entry.memoryLabel)" + entry.listeningPorts.map { ", порт " + $0 }.joined())
         updateHover()
     }
 
@@ -244,5 +244,64 @@ private extension ProcessRole {
         case .helper: "Помощник"
         case .other: "Процесс"
         }
+    }
+}
+
+@MainActor
+final class SessionHeaderCell: NSTableCellView {
+    let titleLabel = NSTextField(labelWithString: "")
+    let mcpLabel = NSTextField(labelWithString: "")
+
+    init(session: AgentSession) {
+        super.init(frame: .zero)
+        let dot = SessionStateDot(state: session.state)
+        let age = ProcessEntry.durationLabel(seconds: max(0, Int(Date().timeIntervalSince1970) - Int(session.startedSeconds)))
+        titleLabel.stringValue = "\(session.kind.displayName) · \(session.uiProjectName) · \(age)" + session.state.uiSuffix
+        titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let mcp = session.uiMCPProcesses
+        mcpLabel.stringValue = mcp.isEmpty ? "" : "· MCP \(mcp.count)"
+        mcpLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        mcpLabel.textColor = .secondaryLabelColor
+        mcpLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let mcpNames = mcp.map { "\($0.entry.displayName) · PID \($0.id)" }.joined(separator: "\n")
+        mcpLabel.toolTip = mcp.isEmpty ? nil : "MCP (\(mcp.count)):\n" + mcpNames
+        let hint = titleLabel.stringValue + "\n" + (session.projectPath.isEmpty ? "Проект неизвестен" : session.projectPath)
+            + (mcp.isEmpty ? "" : "\nMCP:\n" + mcpNames) + "\nНажмите для подробностей сессии"
+        titleLabel.toolTip = hint
+        toolTip = hint
+        setAccessibilityLabel(titleLabel.stringValue + (mcp.isEmpty ? "" : ", MCP \(mcp.count): " + mcpNames))
+        for child in [dot, titleLabel, mcpLabel] {
+            child.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(child)
+        }
+        NSLayoutConstraint.activate([
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 7),
+            dot.heightAnchor.constraint(equalToConstant: 7),
+            titleLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 7),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: mcpLabel.leadingAnchor, constant: -8),
+            mcpLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            mcpLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+@MainActor
+private final class SessionStateDot: NSView {
+    private let state: SessionState
+    init(state: SessionState) {
+        self.state = state
+        super.init(frame: .zero)
+        setAccessibilityLabel(state == .active ? "Активна" : "Неактивна")
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func draw(_ dirtyRect: NSRect) {
+        (state == .active ? NSColor.systemGreen : NSColor.systemGray).setFill()
+        NSBezierPath(ovalIn: bounds).fill()
     }
 }

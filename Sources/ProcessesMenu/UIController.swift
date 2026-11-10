@@ -11,7 +11,7 @@ enum ProcessRow {
     var height: CGFloat {
         switch self {
         case .leftovers: 38
-        case .session: 34
+        case .session: 32
         case .process(_, let session): session?.state == .ended || isIdle(session?.state) ? 48 : 28
         case .message: 30
         case .other: 40
@@ -190,7 +190,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
 
     private func matches(_ entry: ProcessEntry, project: String = "") -> Bool {
         let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty || [entry.name, entry.command, entry.workingDirectory, String(entry.pid), project, projectByPID[entry.pid] ?? ""]
+        return query.isEmpty || [entry.displayName, entry.name, entry.command, entry.workingDirectory, String(entry.pid), project, projectByPID[entry.pid] ?? ""]
             .contains { $0.localizedCaseInsensitiveContains(query) }
             || entry.listeningPorts.contains { $0.localizedCaseInsensitiveContains(query) }
     }
@@ -214,19 +214,24 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             } else if search.stringValue.isEmpty && snapshot.leftoverCount == 0 {
                 rows.append(.message("Агенты ничего не оставили ✓"))
             }
-            for session in snapshot.liveSessions {
+            let orderedSessions = snapshot.liveSessions.enumerated().sorted {
+                let left = $0.element.uiPriority, right = $1.element.uiPriority
+                return left == right ? $0.offset < $1.offset : left > right
+            }.map(\.element)
+            for session in orderedSessions {
                 let items = matchingProcesses(session)
                 let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 let projectMatches = (session.projectPath + " " + session.kind.displayName).localizedCaseInsensitiveContains(query)
                 guard query.isEmpty || !items.isEmpty || projectMatches else { continue }
                 rows.append(.session(session))
-                if items.isEmpty { rows.append(.message(query.isEmpty || session.processes.isEmpty ? "ничего не запущено" : "Нет совпадений в сессии")) }
-                else { rows += items.map { .process($0, session) } }
+                // MCP stays discoverable through explicit search and session details.
+                let visible = query.isEmpty ? items.filter { $0.role != .mcp } : items
+                rows += visible.map { .process($0, session) }
             }
             let other = snapshot.otherServers.filter { matches($0.entry) }
             if !other.isEmpty {
                 let expanded = otherExpanded || !search.stringValue.isEmpty
-                let summary = other.map { $0.entry.name + $0.entry.listeningPorts.map { " :" + $0 }.joined(separator: ",") }.joined(separator: ", ")
+                let summary = other.map { $0.entry.displayName + $0.entry.listeningPorts.map { " :" + $0 }.joined(separator: ",") }.joined(separator: ", ")
                 rows.append(.other(summary, expanded))
                 if expanded { rows += other.map { .process($0, nil) } }
             }
@@ -253,8 +258,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         case .leftovers(let count):
             return UISectionCell(title: "⚠ Остались после агентов (\(count))", accent: true, buttonTitle: "Остановить все") { [weak self] in self?.confirmStopAll() }
         case .session(let session):
-            let age = ProcessEntry.durationLabel(seconds: max(0, Int(Date().timeIntervalSince1970) - Int(session.startedSeconds)))
-            return UISectionCell(title: "● \(session.kind.displayName) · \(session.projectName) · \(age)" + session.state.uiSuffix, accent: false)
+            return SessionHeaderCell(session: session)
         case .message(let text):
             return UISectionCell(title: text, secondary: true)
         case .other(let summary, let expanded):
@@ -268,14 +272,21 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         case .other:
             otherExpanded.toggle()
             rebuildRows()
+        case .session(let session):
+            guard let cell = table.view(atColumn: 0, row: table.clickedRow, makeIfNecessary: true) else { return }
+            showPopover(SessionDetailsController(session: session), from: cell)
         case .process(let item, _):
             guard let cell = table.view(atColumn: 0, row: table.clickedRow, makeIfNecessary: true) else { return }
-            details.close()
-            details.behavior = .transient
-            details.contentViewController = ProcessDetailsController(item: item)
-            details.show(relativeTo: cell.bounds, of: cell, preferredEdge: .maxX)
+            showPopover(ProcessDetailsController(item: item), from: cell)
         default: break
         }
+    }
+
+    private func showPopover(_ controller: NSViewController, from cell: NSView) {
+        details.close()
+        details.behavior = .transient
+        details.contentViewController = controller
+        details.show(relativeTo: cell.bounds, of: cell, preferredEdge: .maxX)
     }
 
     private func confirmStopAll() {
@@ -285,7 +296,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         alert.alertStyle = .warning
         alert.messageText = "Остановить всё, что осталось после агентов?"
         alert.informativeText = "Будут остановлены процессы и их дочерние задачи:\n\n" + snapshot.leftoverSessions.flatMap { session in
-            session.processes.filter { $0.depth == 0 }.map { "• \($0.entry.name)\($0.entry.listeningPorts.map { " :" + $0 }.joined()) · \(session.kind.displayName) · \(session.projectName) · PID \($0.id)" }
+            session.processes.filter { $0.depth == 0 }.map { "• \($0.entry.displayName)\($0.entry.listeningPorts.map { " :" + $0 }.joined()) · \(session.kind.displayName) · \(session.uiProjectName) · PID \($0.id)" }
         }.joined(separator: "\n") + "\n\nЕсли процесс не ответит, он будет завершён принудительно."
         alert.addButton(withTitle: "Отмена")
         alert.addButton(withTitle: "Остановить все")
@@ -313,7 +324,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             stopTask = nil
             rebuildRows()
             refreshNow()
-            // The stub returns after SIGTERM; the real implementation waits for exit.
+            // Collect follow-up snapshots after asynchronous process exit and regrouping.
             followupTask?.cancel()
             followupTask = Task { [weak self] in
                 for delay in [300_000_000, 800_000_000] {
@@ -349,11 +360,21 @@ final class UIBackgroundView: NSView {
 extension AgentSession {
     /// Preserve the containing project when a session is rooted in a common subdirectory.
     var uiProjectName: String {
+        let path = projectPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty, path != "/" else { return "—" }
         if ["frontend", "backend", "client", "server", "web"].contains(projectName) {
             let parent = (projectPath as NSString).deletingLastPathComponent
             let prefix = (parent as NSString).lastPathComponent
             if !prefix.isEmpty { return prefix + "/" + projectName }
         }
-        return projectName
+        return projectName == "/" || projectName.isEmpty ? "—" : projectName
+    }
+
+    var uiMCPProcesses: [AttributedProcess] { processes.filter { $0.depth == 0 && $0.role == .mcp } }
+
+    var uiPriority: Int {
+        let items = processes.filter { $0.depth == 0 }
+        if items.contains(where: { $0.role == .server || $0.role == .browser }) { return 2 }
+        return items.contains(where: { $0.role != .mcp }) ? 1 : 0
     }
 }

@@ -17,7 +17,7 @@ enum UIFixtures {
 
     static func session(_ id: String, _ kind: AgentKind, _ project: String, minutes: Int, state: SessionState = .active, items: [AttributedProcess]) -> AgentSession {
         AgentSession(id: id, kind: kind, sessionID: id, agentPID: state == .ended ? nil : 88_000,
-                     projectPath: "/fixture/projects/" + project,
+                     projectPath: project.isEmpty ? "" : "/fixture/projects/" + project,
                      startedSeconds: UInt64(Date().timeIntervalSince1970) - UInt64(minutes * 60),
                      state: state, processes: items)
     }
@@ -28,14 +28,23 @@ enum UIFixtures {
         let chrome = item(entry(91_003, "Chrome headless", minutes: 120, memory: 128), role: .browser)
         let codexMCP = item(entry(91_004, "playwright-mcp", memory: 92), role: .mcp)
         let claudeMCP = item(entry(91_005, "playwright-mcp (headless)", minutes: 205, memory: 8), role: .mcp)
+        let leftoverMCP = item(entry(91_015, "filesystem-mcp", minutes: 80, memory: 13), role: .mcp)
+        let liveVite = item(entry(91_010, "vite development server for an exceptionally long frontend project name", memory: 72, ports: ["3003"], cwd: "/fixture/projects/vglub-landing-fourth"), role: .server)
+        let liveMCPs = ["playwright-mcp", "figma-mcp", "filesystem-mcp"].enumerated().map {
+            item(entry(pid_t(91_011 + $0.offset), $0.element, memory: 13), role: .mcp)
+        }
+        let liveBrowser = item(entry(91_014, "Chrome headless", memory: 32), role: .browser)
         let leftovers = [
             session("ended-codex", .codex, "sessions-online-third/frontend", minutes: 7, state: .ended, items: [vite]),
-            session("ended-claude", .claude, "browser-checks", minutes: 120, state: .ended, items: [chrome])
+            session("ended-claude", .claude, "", minutes: 120, state: .ended, items: [chrome, leftoverMCP])
         ]
         let live = [
             session("live-codex", .codex, "sessions-online-third", minutes: 12, items: [codexMCP]),
             session("live-claude", .claude, "vglub-landing", minutes: 205, items: [claudeMCP]),
-            session("live-empty", .claude, "processes-app", minutes: 2, items: [])
+            session("live-empty", .claude, "processes-app", minutes: 2, items: []),
+            session("live-vite", .codex, "vglub-landing-fourth", minutes: 8, items: [liveVite] + liveMCPs),
+            session("live-browser", .cursor, "browser-validation", minutes: 16, items: [liveBrowser]),
+            session("live-second-empty", .kimi, "a-long-project-name-for-empty-session-truncation", minutes: 34, items: [])
         ]
         let others = [
             item(entry(91_006, "OrbStack", minutes: 300, memory: 180, ports: ["8080"]), role: .server),
