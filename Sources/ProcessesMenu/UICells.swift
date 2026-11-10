@@ -21,8 +21,10 @@ final class UISectionCell: NSTableCellView {
         if let buttonTitle {
             let button = NSButton(title: buttonTitle, target: self, action: #selector(performAction))
             button.bezelStyle = .inline
+            button.isBordered = false
             button.font = .systemFont(ofSize: 11, weight: .medium)
             button.contentTintColor = .systemOrange
+            button.attributedTitle = NSAttributedString(string: buttonTitle, attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.systemOrange])
             button.translatesAutoresizingMaskIntoConstraints = false
             addSubview(button)
             NSLayoutConstraint.activate([
@@ -93,6 +95,7 @@ final class ProcessCell: NSTableCellView {
         portStack.spacing = 3
         portStack.setContentCompressionResistancePriority(.required, for: .horizontal)
         stop.bezelStyle = .inline
+        stop.isBordered = false
         stop.font = .systemFont(ofSize: 10)
         stop.contentTintColor = .systemRed
         stop.target = self
@@ -120,7 +123,7 @@ final class ProcessCell: NSTableCellView {
             memoryLabel.widthAnchor.constraint(equalToConstant: 56),
             memoryLabel.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
             memoryLabel.trailingAnchor.constraint(equalTo: stop.leadingAnchor, constant: -5),
-            stop.widthAnchor.constraint(equalToConstant: 69),
+            stop.widthAnchor.constraint(equalToConstant: 80),
             stop.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
             stop.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
             metadata.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
@@ -146,12 +149,12 @@ final class ProcessCell: NSTableCellView {
         metadata.isHidden = !isLeftover
         if let session, isLeftover {
             let age = ProcessEntry.durationLabel(seconds: max(0, Int(Date().timeIntervalSince1970) - Int(entry.startedSeconds)))
-            metadata.stringValue = "\(session.projectName) · \(session.kind.displayName)\(session.state.uiSuffix) · \(age)"
+            metadata.stringValue = "\(session.uiProjectName) · \(session.kind.displayName)\(session.state.uiSuffix) · \(age)"
             metadata.toolTip = session.projectPath + "\n" + metadata.stringValue
         }
         let muted = item.role == .mcp && !isLeftover
         nameLabel.textColor = muted ? .secondaryLabelColor : .labelColor
-        icon.contentTintColor = muted ? .tertiaryLabelColor : isLeftover ? .systemOrange : .secondaryLabelColor
+        icon.contentTintColor = muted ? .secondaryLabelColor : isLeftover ? .systemOrange : .secondaryLabelColor
         icon.image = NSImage(systemSymbolName: item.role.symbol, accessibilityDescription: item.role.accessibilityName)
         portStack.arrangedSubviews.forEach { portStack.removeArrangedSubview($0); $0.removeFromSuperview() }
         for port in entry.listeningPorts {
@@ -160,6 +163,7 @@ final class ProcessCell: NSTableCellView {
         }
         stop.title = stopping ? "Остановка…" : "Остановить"
         stop.isEnabled = !stopping && entry.canTerminate
+        stop.attributedTitle = NSAttributedString(string: stop.title, attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: stop.isEnabled ? NSColor.systemRed : NSColor.secondaryLabelColor])
         stop.toolTip = entry.canTerminate ? "Остановить процесс и его дочерние задачи" : "Нет прав на остановку процесса"
         stop.setAccessibilityLabel("Остановить \(entry.name), PID \(entry.pid)")
         toolTip = "\(entry.name) · PID \(entry.pid) · PPID \(entry.parentPID)\n\(entry.workingDirectory)\n\(entry.command)\nНажмите для подробностей"

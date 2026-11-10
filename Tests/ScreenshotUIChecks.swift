@@ -18,6 +18,7 @@ enum ScreenshotUIChecks {
             controller.selectTab(all ? 1 : 0)
             controller.view.layoutSubtreeIfNeeded()
             controller.table.layoutSubtreeIfNeeded()
+            controller.view.displayIfNeeded()
             if hover {
                 let cell = controller.table.view(atColumn: 0, row: 1, makeIfNecessary: true) as? ProcessCell
                 cell?.setHoveredForCheck(true)
@@ -51,17 +52,23 @@ enum ScreenshotUIChecks {
         let controller = ProcessListController()
         _ = controller.view
         controller.receive(UIFixtures.agents)
-        for (query, expected) in [("8000", 91_001), ("91003", 91_003), ("vglub-landing", 91_005)] {
+        for (query, expected) in [("8000", 91_001), ("91003", 91_003), ("vglub-landing", 91_005), ("Chrome", 91_003), ("8080", 91_006)] {
             controller.setQuery(query)
             let ids = controller.rows.compactMap { row -> pid_t? in if case .process(let item, _) = row { return item.id }; return nil }
             precondition(ids == [pid_t(expected)], "Agents search must match port, PID and session project")
         }
         controller.selectTab(1)
-        controller.setQuery("54321")
-        precondition(controller.rows.count == 1)
+        controller.setQuery("3001")
+        let portIDs = controller.rows.compactMap { row -> pid_t? in if case .process(let item, _) = row { return item.id }; return nil }
+        precondition(portIDs == [91_008], "All-processes search must match a listening port")
         controller.setQuery("sessions-online-third/frontend")
         let ids = controller.rows.compactMap { row -> pid_t? in if case .process(let item, _) = row { return item.id }; return nil }
-        precondition(ids == [91_001], "All-processes search must match project path")
+        precondition(ids == [91_001, 91_002], "All-processes search must match project path, including session children")
+        controller.setQuery("vglub-landing")
+        let projectIDs = controller.rows.compactMap { row -> pid_t? in if case .process(let item, _) = row { return item.id }; return nil }
+        precondition(projectIDs == [91_005], "All-processes search must retain session project context even when process cwd is unavailable")
+        controller.setQuery("no-such-fixture")
+        guard case .message("Ничего не найдено") = controller.rows.first else { fatalError("No-result search must be explicit") }
         precondition(app.windows.allSatisfy { !$0.isVisible }, "No test window may be visible")
         print("PASS: agent and all-processes search")
     }

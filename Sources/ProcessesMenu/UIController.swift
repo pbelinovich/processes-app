@@ -12,7 +12,7 @@ enum ProcessRow {
         switch self {
         case .leftovers: 38
         case .session: 34
-        case .process(_, let session): session?.state == .ended || isIdle(session?.state) ? 48 : 30
+        case .process(_, let session): session?.state == .ended || isIdle(session?.state) ? 48 : 28
         case .message: 30
         case .other: 40
         }
@@ -32,6 +32,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     private let status = NSTextField(labelWithString: "Загрузка…")
     private let scroll = NSScrollView()
     private var snapshot: AttributedSnapshot = .empty
+    private var projectByPID: [pid_t: String] = [:]
     private(set) var rows: [ProcessRow] = []
     private var otherExpanded = false
     private var timer: Timer?
@@ -40,13 +41,13 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     private var stopTask: Task<Void, Never>?
     private var followupTask: Task<Void, Never>?
     private var statusMessage: String?
+    private var stopErrors: String?
     private var stoppingPIDs: Set<pid_t> = []
     private let details = NSPopover()
     var onSnapshot: ((AttributedSnapshot) -> Void)?
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 640))
-        view.wantsLayer = true
+        view = UIBackgroundView(frame: NSRect(x: 0, y: 0, width: 560, height: 640))
         preferredContentSize = view.frame.size
         tabs.selectedSegment = 0
         tabs.target = self
@@ -136,9 +137,11 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
 
     private func scheduleRefresh(every seconds: TimeInterval) {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: true) { [weak self] _ in
+        let refreshTimer = Timer(timeInterval: seconds, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshIfNeeded() }
         }
+        RunLoop.main.add(refreshTimer, forMode: .common)
+        timer = refreshTimer
     }
 
     @objc func refreshNow() {
@@ -159,6 +162,14 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
 
     func receive(_ result: AttributedSnapshot) {
         snapshot = result
+        projectByPID = [:]
+        for session in result.liveSessions + result.leftoverSessions {
+            for item in session.processes {
+                projectByPID[item.id] = session.projectPath
+                for entry in item.tree { projectByPID[entry.pid] = session.projectPath }
+            }
+            if let pid = session.agentPID { projectByPID[pid] = session.projectPath }
+        }
         onSnapshot?(result)
         if isViewLoaded { rebuildRows() }
     }
@@ -179,7 +190,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
 
     private func matches(_ entry: ProcessEntry, project: String = "") -> Bool {
         let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty || [entry.name, entry.command, entry.workingDirectory, String(entry.pid), project]
+        return query.isEmpty || [entry.name, entry.command, entry.workingDirectory, String(entry.pid), project, projectByPID[entry.pid] ?? ""]
             .contains { $0.localizedCaseInsensitiveContains(query) }
             || entry.listeningPorts.contains { $0.localizedCaseInsensitiveContains(query) }
     }
@@ -224,7 +235,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         status.stringValue = statusMessage ?? (tabs.selectedSegment == 1
             ? "Процессов: \(snapshot.all.filter { matches($0) }.count) · RSS · каждые 3 с"
             : "Сессий: \(snapshot.liveSessions.count) · осталось: \(snapshot.leftoverCount) · каждые 3 с")
-        status.toolTip = status.stringValue
+        status.toolTip = stopErrors ?? status.stringValue
         table.reloadData()
     }
 
@@ -288,6 +299,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         let tree = items.flatMap(\.tree).filter { seen.insert($0.pid).inserted }
         guard !tree.isEmpty else { return }
         stoppingPIDs = Set(items.map(\.id))
+        stopErrors = nil
         statusMessage = "Останавливаем \(items.count)…"
         rebuildRows()
         stopTask = Task { [weak self] in
@@ -297,7 +309,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             let total = result.stopped.count + result.killed.count
             statusMessage = "Остановлено \(total) процесса, \(result.killed.count) принудительно"
                 + (result.failed.isEmpty ? "" : " · ошибок: \(result.failed.count)")
-            status.toolTip = result.failed.sorted { $0.key < $1.key }.map { "PID \($0.key): \($0.value)" }.joined(separator: "\n")
+            stopErrors = result.failed.isEmpty ? nil : result.failed.sorted { $0.key < $1.key }.map { "PID \($0.key): \($0.value)" }.joined(separator: "\n")
             stopTask = nil
             rebuildRows()
             refreshNow()
@@ -320,5 +332,28 @@ extension SessionState {
         case .ended: " · сессия завершена"
         case .idle(let seconds): " · неактивна \(ProcessEntry.durationLabel(seconds: seconds))"
         }
+    }
+}
+
+/// An opaque AppKit surface also makes cacheDisplay screenshots match the popover.
+@MainActor
+final class UIBackgroundView: NSView {
+    override var isOpaque: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
+        super.draw(dirtyRect)
+    }
+}
+
+extension AgentSession {
+    /// Preserve the containing project when a session is rooted in a common subdirectory.
+    var uiProjectName: String {
+        if ["frontend", "backend", "client", "server", "web"].contains(projectName) {
+            let parent = (projectPath as NSString).deletingLastPathComponent
+            let prefix = (parent as NSString).lastPathComponent
+            if !prefix.isEmpty { return prefix + "/" + projectName }
+        }
+        return projectName
     }
 }
