@@ -17,6 +17,7 @@ enum ProcessService {
         let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
         guard count > 0 else { return [] }
         var owners: [uid_t: String] = [:]
+        let argumentCapacity = argumentBufferCapacity()
         return pids.prefix(Int(count)).compactMap { pid in
             guard pid > 0, var info = details(pid) else { return nil }
             let name = withUnsafePointer(to: &info.pbi_name) {
@@ -31,14 +32,15 @@ enum ProcessService {
             var task = proc_taskinfo()
             let taskSize = Int32(MemoryLayout<proc_taskinfo>.size)
             let hasMemory = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, taskSize) == taskSize
+            let arguments = info.pbi_uid == getuid() ? processArguments(pid, capacity: argumentCapacity) : (command: "", marker: nil)
             return ProcessEntry(pid: pid, name: name.isEmpty ? fallback : name,
                                 owner: owners[info.pbi_uid]!, uid: info.pbi_uid,
                                 startedSeconds: info.pbi_start_tvsec,
                                 startedMicroseconds: info.pbi_start_tvusec,
-                                parentPID: pid_t(info.pbi_ppid),
+                                parentPID: pid_t(info.pbi_ppid), processGroup: pid_t(info.pbi_pgid),
                                 residentBytes: hasMemory ? task.pti_resident_size : nil,
-                                command: commandLine(pid), listeningPorts: ports[pid] ?? [],
-                                workingDirectory: workingDirectory(pid))
+                                command: arguments.command, listeningPorts: ports[pid] ?? [],
+                                workingDirectory: workingDirectory(pid), agentMarker: arguments.marker)
         }.sorted {
             let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
             return comparison == .orderedSame ? $0.pid < $1.pid : comparison == .orderedAscending
@@ -54,30 +56,63 @@ enum ProcessService {
         }
     }
 
+    /// KERN_ARGMAX is shared by the snapshot; each owned process needs only one PROCARGS2 call.
+    static func argumentBufferCapacity() -> Int {
+        var maximum: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        var mib: [Int32] = [CTL_KERN, KERN_ARGMAX]
+        guard sysctl(&mib, 2, &maximum, &size, nil, 0) == 0, maximum > 0 else { return 262_144 }
+        return Int(maximum)
+    }
+
     static func commandLine(_ pid: pid_t) -> String {
+        guard details(pid)?.pbi_uid == getuid() else { return "" }
+        return processArguments(pid, capacity: argumentBufferCapacity()).command
+    }
+
+    static func processArguments(_ pid: pid_t, capacity: Int) -> (command: String, marker: AgentMarker?) {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return "" }
-        var bytes = [UInt8](repeating: 0, count: size)
+        var size = capacity
+        var bytes = [UInt8](repeating: 0, count: capacity)
         let result = bytes.withUnsafeMutableBytes { sysctl(&mib, 3, $0.baseAddress, &size, nil, 0) }
-        guard result == 0 else { return "" }
-        bytes = Array(bytes.prefix(size))
+        guard result == 0 else { return ("", nil) }
+        return parseArguments(bytes.prefix(size))
+    }
+
+    /// Never decode an environment entry before checking its key as bytes.
+    static func parseArguments(_ bytes: ArraySlice<UInt8>) -> (command: String, marker: AgentMarker?) {
+        guard bytes.count > MemoryLayout<Int32>.size else { return ("", nil) }
         let argc = bytes.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
-        guard argc > 0 else { return "" }
-        var offset = MemoryLayout<Int32>.size
-        // Skip executable path and padding. Read exactly argc arguments, never environment variables.
-        while offset < bytes.count && bytes[offset] != 0 { offset += 1 }
-        while offset < bytes.count && bytes[offset] == 0 { offset += 1 }
+        guard argc > 0, argc < bytes.count else { return ("", nil) }
+        var offset = bytes.startIndex + MemoryLayout<Int32>.size
+        while offset < bytes.endIndex && bytes[offset] != 0 { offset += 1 }
+        while offset < bytes.endIndex && bytes[offset] == 0 { offset += 1 }
         var arguments: [String] = []
         for _ in 0..<argc {
-            guard offset < bytes.count else { break }
+            guard offset < bytes.endIndex else { return (arguments.joined(separator: " "), nil) }
             let start = offset
-            while offset < bytes.count && bytes[offset] != 0 { offset += 1 }
+            while offset < bytes.endIndex && bytes[offset] != 0 { offset += 1 }
             let argument = String(decoding: bytes[start..<offset], as: UTF8.self)
             arguments.append(argument.contains(where: { $0.isWhitespace }) ? "\"\(argument)\"" : argument)
             offset += 1
         }
-        return arguments.joined(separator: " ")
+        let allowed: [(key: [UInt8], kind: AgentKind)] = [
+            (Array("CLAUDE_CODE_SESSION_ID=".utf8), .claude),
+            (Array("CODEX_THREAD_ID=".utf8), .codex),
+            (Array("CODEX_SESSION_ID=".utf8), .codex)
+        ]
+        var markers: [Int: AgentMarker] = [:]
+        while offset < bytes.endIndex {
+            let start = offset
+            while offset < bytes.endIndex && bytes[offset] != 0 { offset += 1 }
+            let entry = bytes[start..<offset]
+            for (priority, item) in allowed.enumerated() where entry.starts(with: item.key) {
+                let value = entry.dropFirst(item.key.count)
+                if !value.isEmpty { markers[priority] = AgentMarker(kind: item.kind, sessionID: String(decoding: value, as: UTF8.self)) }
+            }
+            offset += 1
+        }
+        return (arguments.joined(separator: " "), markers.keys.min().flatMap { markers[$0] })
     }
 
     static func listeningPorts() -> [pid_t: [String]] {
