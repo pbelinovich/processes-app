@@ -17,7 +17,9 @@ enum ProcessService {
         let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
         guard count > 0 else { return [] }
         var owners: [uid_t: String] = [:]
-        return pids.prefix(Int(count)).compactMap { pid in
+        var argumentBuffer = [UInt8](repeating: 0, count: argumentBufferCapacity())
+        var markerCandidates: [pid_t: [AgentMarker]] = [:]
+        let entries = pids.prefix(Int(count)).compactMap { pid -> ProcessEntry? in
             guard pid > 0, var info = details(pid) else { return nil }
             let name = withUnsafePointer(to: &info.pbi_name) {
                 $0.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
@@ -31,17 +33,43 @@ enum ProcessService {
             var task = proc_taskinfo()
             let taskSize = Int32(MemoryLayout<proc_taskinfo>.size)
             let hasMemory = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, taskSize) == taskSize
+            let arguments = info.pbi_uid == getuid() ? processArguments(pid, buffer: &argumentBuffer) : Arguments(command: "", markers: [])
+            markerCandidates[pid] = arguments.markers
             return ProcessEntry(pid: pid, name: name.isEmpty ? fallback : name,
                                 owner: owners[info.pbi_uid]!, uid: info.pbi_uid,
                                 startedSeconds: info.pbi_start_tvsec,
                                 startedMicroseconds: info.pbi_start_tvusec,
-                                parentPID: pid_t(info.pbi_ppid),
+                                parentPID: pid_t(info.pbi_ppid), processGroup: pid_t(info.pbi_pgid),
                                 residentBytes: hasMemory ? task.pti_resident_size : nil,
-                                command: commandLine(pid), listeningPorts: ports[pid] ?? [],
-                                workingDirectory: workingDirectory(pid))
+                                command: arguments.command, listeningPorts: ports[pid] ?? [],
+                                workingDirectory: workingDirectory(pid), agentMarker: arguments.marker)
         }.sorted {
             let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
             return comparison == .orderedSame ? $0.pid < $1.pid : comparison == .orderedAscending
+        }
+        return resolvingMarkers(entries, candidates: markerCandidates)
+    }
+
+    /// Nested agents can inherit another agent's markers. Prefer the nearest live agent's kind;
+    /// without ancestry, a Codex thread identifier takes priority over a general session identifier.
+    static func resolvingMarkers(_ entries: [ProcessEntry], candidates: [pid_t: [AgentMarker]]) -> [ProcessEntry] {
+        let byPID = Dictionary(entries.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
+        return entries.map { entry in
+            let markers = candidates[entry.pid] ?? []
+            guard Set(markers.map(\.kind)).count > 1 else { return entry }
+            var current: ProcessEntry? = entry
+            var seen: Set<pid_t> = []
+            while let ancestor = current, ancestor.uid == entry.uid, seen.insert(ancestor.pid).inserted {
+                guard ancestor.startedSeconds <= entry.startedSeconds else { break }
+                if let kind = Attribution.agentKind(ancestor), !Attribution.isAgentHelper(ancestor),
+                   let marker = markers.first(where: { $0.kind == kind }) {
+                    var resolved = entry
+                    resolved.agentMarker = marker
+                    return resolved
+                }
+                current = byPID[ancestor.parentPID]
+            }
+            return entry
         }
     }
 
@@ -54,30 +82,91 @@ enum ProcessService {
         }
     }
 
+    /// KERN_ARGMAX is shared by the snapshot; each owned process needs only one PROCARGS2 call.
+    static func argumentBufferCapacity() -> Int {
+        var maximum: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        var mib: [Int32] = [CTL_KERN, KERN_ARGMAX]
+        guard sysctl(&mib, 2, &maximum, &size, nil, 0) == 0, maximum > 0 else { return 262_144 }
+        return Int(maximum)
+    }
+
     static func commandLine(_ pid: pid_t) -> String {
+        guard details(pid)?.pbi_uid == getuid() else { return "" }
+        return processArguments(pid, capacity: argumentBufferCapacity()).command
+    }
+
+    struct Arguments {
+        let command: String
+        let markers: [AgentMarker]
+        var marker: AgentMarker? { markers.first }
+    }
+
+    static func processArguments(_ pid: pid_t, capacity: Int) -> Arguments {
+        var bytes = [UInt8](repeating: 0, count: capacity)
+        return processArguments(pid, buffer: &bytes)
+    }
+
+    static func processArguments(_ pid: pid_t, buffer bytes: inout [UInt8]) -> Arguments {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return "" }
-        var bytes = [UInt8](repeating: 0, count: size)
+        var size = bytes.count
         let result = bytes.withUnsafeMutableBytes { sysctl(&mib, 3, $0.baseAddress, &size, nil, 0) }
-        guard result == 0 else { return "" }
-        bytes = Array(bytes.prefix(size))
-        let argc = bytes.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
-        guard argc > 0 else { return "" }
-        var offset = MemoryLayout<Int32>.size
-        // Skip executable path and padding. Read exactly argc arguments, never environment variables.
-        while offset < bytes.count && bytes[offset] != 0 { offset += 1 }
-        while offset < bytes.count && bytes[offset] == 0 { offset += 1 }
-        var arguments: [String] = []
-        for _ in 0..<argc {
-            guard offset < bytes.count else { break }
-            let start = offset
-            while offset < bytes.count && bytes[offset] != 0 { offset += 1 }
-            let argument = String(decoding: bytes[start..<offset], as: UTF8.self)
-            arguments.append(argument.contains(where: { $0.isWhitespace }) ? "\"\(argument)\"" : argument)
-            offset += 1
+        guard result == 0 else { return Arguments(command: "", markers: []) }
+        return parseArguments(bytes.prefix(size))
+    }
+
+    // CLAUDECODE is only a boolean, so it cannot supply a stable session identity by itself.
+    private static let environmentKeys: [(bytes: [UInt8], kind: AgentKind)] = [
+        (Array("CODEX_THREAD_ID=".utf8), .codex),
+        (Array("CLAUDE_CODE_SESSION_ID=".utf8), .claude),
+        (Array("CODEX_SESSION_ID=".utf8), .codex)
+    ]
+
+    /// Never decode an environment entry before checking its key as bytes.
+    /// C scans keep this cheap even in an unoptimized app with large inherited environments.
+    static func parseArguments(_ bytes: ArraySlice<UInt8>) -> Arguments {
+        bytes.withUnsafeBytes { buffer in
+            guard buffer.count > MemoryLayout<Int32>.size, let base = buffer.baseAddress else {
+                return Arguments(command: "", markers: [])
+            }
+            let argc = buffer.loadUnaligned(as: Int32.self)
+            guard argc > 0, argc < buffer.count else { return Arguments(command: "", markers: []) }
+            func endOfString(_ start: Int) -> Int {
+                guard start < buffer.count,
+                      let end = memchr(base.advanced(by: start), 0, buffer.count - start) else { return buffer.count }
+                return base.distance(to: UnsafeRawPointer(end))
+            }
+            func decode(_ start: Int, _ end: Int) -> String {
+                String(decoding: UnsafeBufferPointer(start: base.advanced(by: start).assumingMemoryBound(to: UInt8.self),
+                                                     count: end - start), as: UTF8.self)
+            }
+            var offset = endOfString(MemoryLayout<Int32>.size)
+            while offset < buffer.count && buffer[offset] == 0 { offset += 1 }
+            var arguments: [String] = []
+            for _ in 0..<argc {
+                guard offset < buffer.count else { return Arguments(command: arguments.joined(separator: " "), markers: []) }
+                let end = endOfString(offset)
+                guard end < buffer.count else { return Arguments(command: arguments.joined(separator: " "), markers: []) }
+                let argument = decode(offset, end)
+                arguments.append(argument.contains(where: { $0.isWhitespace }) ? "\"\(argument)\"" : argument)
+                offset = end + 1
+            }
+            var markers: [Int: AgentMarker] = [:]
+            while offset < buffer.count {
+                let end = endOfString(offset)
+                if end == offset { break } // environment terminator, before Apple's trailing strings
+                for (priority, key) in environmentKeys.enumerated() where end - offset > key.bytes.count {
+                    let matches = key.bytes.withUnsafeBytes { expected in
+                        memcmp(base.advanced(by: offset), expected.baseAddress!, key.bytes.count) == 0
+                    }
+                    if matches {
+                        markers[priority] = AgentMarker(kind: key.kind, sessionID: decode(offset + key.bytes.count, end))
+                    }
+                }
+                offset = end + 1
+            }
+            return Arguments(command: arguments.joined(separator: " "), markers: markers.keys.sorted().compactMap { markers[$0] })
         }
-        return arguments.joined(separator: " ")
     }
 
     static func listeningPorts() -> [pid_t: [String]] {

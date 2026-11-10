@@ -4,7 +4,8 @@ import Darwin
 // Standalone integration checks, runnable with Command Line Tools (no XCTest required).
 @main
 enum ProcessServiceChecks {
-    static func main() throws {
+    static func main() async throws {
+        if CommandLine.arguments.contains("--marker-child") { sleep(60); return }
         let snapshot = ProcessService.snapshot()
         guard let own = snapshot.first(where: { $0.pid == getpid() }) else {
             fatalError("Current process missing from snapshot")
@@ -12,6 +13,7 @@ enum ProcessServiceChecks {
         precondition(!own.name.isEmpty && !own.canTerminate)
         precondition((own.residentBytes ?? 0) > 0)
         precondition(own.parentPID == getppid())
+        precondition(own.processGroup == getpgrp())
         precondition(!own.command.isEmpty)
         precondition(own.workingDirectory == FileManager.default.currentDirectoryPath)
         expectFailure { try ProcessService.terminate(own) }
@@ -55,7 +57,100 @@ enum ProcessServiceChecks {
             precondition(child.terminationReason == .uncaughtSignal)
             precondition(child.terminationStatus == (force ? SIGKILL : SIGTERM))
         }
-        print("PASS: RSS, parent PID, command, working directory, live TCP listener, port parser, self-protection, stale PID identity, SIGTERM, SIGKILL")
+        try await checkMarkersAndStopping()
+        print("PASS: RSS, parent PID, PGID, command, cwd, TCP listener, whitelist parser, self/stale identity protection, inherited marker, child-first tree stop, TERM-to-KILL escalation")
+    }
+
+    static func checkMarkersAndStopping() async throws {
+        // A synthetic byte buffer proves that only the whitelist's values reach the result.
+        var bytes = withUnsafeBytes(of: Int32(2)) { Array($0) }
+        bytes += Array("/bin/sleep\0\0/bin/sleep\060\0UNRELATED_SECRET=not-an-argument\0CODEX_SESSION_ID=fallback\0CODEX_THREAD_ID=preferred\0\0".utf8)
+        let parsed = ProcessService.parseArguments(bytes[...])
+        precondition(parsed.command == "/bin/sleep 60")
+        precondition(parsed.marker == AgentMarker(kind: .codex, sessionID: "preferred"))
+        var claudeBytes = withUnsafeBytes(of: Int32(1)) { Array($0) }
+        claudeBytes += Array("/bin/sleep\0\0/bin/sleep\0CLAUDECODE=1\0CLAUDE_CODE_SESSION_ID=synthetic\0UNRELATED_SECRET=ignored\0".utf8)
+        precondition(ProcessService.parseArguments(claudeBytes[...]).marker == AgentMarker(kind: .claude, sessionID: "synthetic"))
+
+        let markerChild = Process()
+        markerChild.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        markerChild.arguments = ["60"]
+        let marker = AgentMarker(kind: .codex, sessionID: "test-" + UUID().uuidString)
+        // Supply a minimal environment instead of copying the test runner's environment.
+        markerChild.environment = ["CODEX_THREAD_ID": marker.sessionID, "UNRELATED_SECRET": "synthetic"]
+        try markerChild.run()
+        let marked = ProcessService.snapshot().first { $0.pid == markerChild.processIdentifier }!
+        defer { try? ProcessService.terminate(marked, force: true); markerChild.waitUntilExit() }
+        if marked.agentMarker == nil {
+            print("SKIP: /bin/sleep environment is omitted by KERN_PROCARGS2 on this host; verify marker on the test executable instead")
+        } else { precondition(marked.agentMarker == marker) }
+        precondition(marked.processGroup == getpgid(marked.pid))
+        let markerStop = await ProcessService.stop([marked], grace: 1)
+        precondition(markerStop.stopped == [marked.pid] && markerStop.killed.isEmpty && markerStop.failed.isEmpty)
+        markerChild.waitUntilExit()
+
+        let unrestricted = Process()
+        unrestricted.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        unrestricted.arguments = ["--marker-child"]
+        unrestricted.environment = ["CODEX_THREAD_ID": marker.sessionID, "UNRELATED_SECRET": "synthetic"]
+        try unrestricted.run()
+        let unrestrictedEntry = ProcessService.snapshot().first { $0.pid == unrestricted.processIdentifier }!
+        defer { try? ProcessService.terminate(unrestrictedEntry, force: true); unrestricted.waitUntilExit() }
+        precondition(unrestrictedEntry.agentMarker == marker)
+        let staleChild = ProcessEntry(pid: unrestrictedEntry.pid, name: "stale", owner: "synthetic", uid: getuid(),
+                                      startedSeconds: unrestrictedEntry.startedSeconds + 1, startedMicroseconds: 0)
+        let staleStop = await ProcessService.stop([staleChild], grace: 0)
+        precondition(staleStop.killed.isEmpty && staleStop.failed.isEmpty && unrestricted.isRunning)
+        let foreign = ProcessEntry(pid: unrestrictedEntry.pid, name: "foreign", owner: "synthetic", uid: getuid() + 1,
+                                   startedSeconds: unrestrictedEntry.startedSeconds, startedMicroseconds: unrestrictedEntry.startedMicroseconds)
+        let initProcess = ProcessEntry(pid: 1, name: "launchd", owner: "synthetic", uid: getuid(),
+                                       startedSeconds: 0, startedMicroseconds: 0)
+        let forbidden = await ProcessService.stop([foreign, initProcess], grace: 0)
+        precondition(forbidden.failed.count == 2 && forbidden.stopped.isEmpty && forbidden.killed.isEmpty && unrestricted.isRunning)
+        let unrestrictedResult = await ProcessService.stop([unrestrictedEntry], grace: 1)
+        precondition(unrestrictedResult.failed.isEmpty && unrestrictedResult.stopped == [unrestrictedEntry.pid])
+        unrestricted.waitUntilExit()
+
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = ["-c", "sleep 60 & first=$!; sleep 60 & second=$!; printf '%s %s\\n' \"$first\" \"$second\"; wait"]
+        let output = Pipe()
+        shell.standardOutput = output
+        try shell.run()
+        let line = output.fileHandleForReading.availableData
+        let childPIDs = String(decoding: line, as: UTF8.self).split(whereSeparator: { $0.isWhitespace }).compactMap { pid_t($0) }
+        precondition(childPIDs.count == 2)
+        let ownPIDs = Set(childPIDs + [shell.processIdentifier])
+        let tree = ProcessService.snapshot().filter { ownPIDs.contains($0.pid) }
+        defer {
+            for entry in tree { try? ProcessService.terminate(entry, force: true) }
+            shell.waitUntilExit()
+        }
+        precondition(tree.count == 3)
+        // Input order deliberately does not encode the parent tree's depth.
+        let result = await ProcessService.stop(tree.sorted { $0.pid < $1.pid }, grace: 1)
+        precondition(result.failed.isEmpty && result.killed.isEmpty && Set(result.stopped) == ownPIDs)
+        shell.waitUntilExit()
+        for entry in tree {
+            precondition(ProcessService.details(entry.pid).map { $0.pbi_status == UInt32(SZOMB) } ?? true)
+        }
+
+        let stubborn = Process()
+        stubborn.executableURL = URL(fileURLWithPath: "/bin/sh")
+        stubborn.arguments = ["-c", "trap '' TERM; printf 'ready\\n'; exec /bin/sleep 60"]
+        let ready = Pipe()
+        stubborn.standardOutput = ready
+        try stubborn.run()
+        precondition(!ready.fileHandleForReading.availableData.isEmpty)
+        let stubbornEntry = ProcessService.snapshot().first { $0.pid == stubborn.processIdentifier }!
+        defer { try? ProcessService.terminate(stubbornEntry, force: true); stubborn.waitUntilExit() }
+        let escalated = await ProcessService.stop([stubbornEntry], grace: 0.1)
+        precondition(escalated.killed == [stubbornEntry.pid] && escalated.failed.isEmpty)
+        stubborn.waitUntilExit()
+        precondition(stubborn.terminationStatus == SIGKILL)
+
+        let protected = await ProcessService.stop([ProcessService.snapshot().first { $0.pid == getpid() }!], grace: 0)
+        precondition(protected.failed[getpid()] != nil && protected.stopped.isEmpty && protected.killed.isEmpty)
     }
 
     static func expectFailure(_ operation: () throws -> Void) {
