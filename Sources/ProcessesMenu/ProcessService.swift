@@ -122,6 +122,28 @@ enum ProcessService {
         (Array("CODEX_SESSION_ID=".utf8), .codex)
     ]
 
+    // This whitelisted value is never decoded: retain only the numeric socket basename.
+    private static let messagingSocketKey = Array("CLAUDE_CODE_MESSAGING_SOCKET=".utf8)
+
+    private static func messagingHostPID(_ value: UnsafeRawBufferPointer) -> pid_t? {
+        let suffix = Array(".sock".utf8)
+        guard value.count > suffix.count,
+              suffix.enumerated().allSatisfy({ value[value.count - suffix.count + $0.offset] == $0.element }) else { return nil }
+        let end = value.count - suffix.count
+        var start = end
+        while start > 0 && value[start - 1] != 47 { start -= 1 } // last '/' byte
+        guard start < end else { return nil }
+        var pid: pid_t = 0
+        for index in start..<end {
+            let byte = value[index]
+            guard byte >= 48 && byte <= 57 else { return nil }
+            let digit = pid_t(byte - 48)
+            guard pid <= (pid_t.max - digit) / 10 else { return nil }
+            pid = pid * 10 + digit
+        }
+        return pid > 1 ? pid : nil
+    }
+
     /// Never decode an environment entry before checking its key as bytes.
     /// C scans keep this cheap even in an unoptimized app with large inherited environments.
     static func parseArguments(_ bytes: ArraySlice<UInt8>) -> Arguments {
@@ -152,6 +174,7 @@ enum ProcessService {
                 offset = end + 1
             }
             var markers: [Int: AgentMarker] = [:]
+            var messagingHost: pid_t?
             while offset < buffer.count {
                 let end = endOfString(offset)
                 if end == offset { break } // environment terminator, before Apple's trailing strings
@@ -163,9 +186,23 @@ enum ProcessService {
                         markers[priority] = AgentMarker(kind: key.kind, sessionID: decode(offset + key.bytes.count, end))
                     }
                 }
+                if end - offset > messagingSocketKey.count {
+                    let matches = messagingSocketKey.withUnsafeBytes { expected in
+                        memcmp(base.advanced(by: offset), expected.baseAddress!, messagingSocketKey.count) == 0
+                    }
+                    if matches {
+                        messagingHost = messagingHostPID(UnsafeRawBufferPointer(start: base.advanced(by: offset + messagingSocketKey.count),
+                                                                             count: end - offset - messagingSocketKey.count))
+                    }
+                }
                 offset = end + 1
             }
-            return Arguments(command: arguments.joined(separator: " "), markers: markers.keys.sorted().compactMap { markers[$0] })
+            let ordered = markers.keys.sorted().compactMap { key -> AgentMarker? in
+                guard var marker = markers[key] else { return nil }
+                if marker.kind == .claude { marker.hostPID = messagingHost }
+                return marker
+            }
+            return Arguments(command: arguments.joined(separator: " "), markers: ordered)
         }
     }
 

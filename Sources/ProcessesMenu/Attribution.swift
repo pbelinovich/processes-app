@@ -10,6 +10,11 @@ enum Attribution {
             (entry.command.isEmpty && entry.name == "ProcessesMenu")
     }
 
+    /// hostPID is evidence about a session, never part of its identity.
+    static func sessionIdentity(_ marker: AgentMarker) -> AgentMarker {
+        AgentMarker(kind: marker.kind, sessionID: marker.sessionID)
+    }
+
     struct SessionFile: Sendable {
         let modifiedAt: Date
         var projectPath: String = ""
@@ -28,6 +33,10 @@ enum Attribution {
 
     static func build(from processes: [ProcessEntry], now: Date,
                       sessionFiles: [AgentMarker: SessionFile]) -> AttributedSnapshot {
+        let filesBySession = Dictionary(sessionFiles.map { (sessionIdentity($0.key), $0.value) }, uniquingKeysWith: { first, second in
+            if first.modifiedAt != second.modifiedAt { return first.modifiedAt > second.modifiedAt ? first : second }
+            return first.projectPath < second.projectPath ? second : first
+        })
         let owned = processes.filter { $0.uid == getuid() && !isApplicationProcess($0) }
         let byPID = Dictionary(owned.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
         let agents = Dictionary(owned.compactMap { entry in
@@ -50,17 +59,27 @@ enum Attribution {
         // An agent often sets its session marker only in its children's environment.
         var agentMarkers: [pid_t: Set<AgentMarker>] = [:]
         var markerAgents: [AgentMarker: ProcessEntry] = [:]
+        var hostAgents: [AgentMarker: ProcessEntry] = [:]
         for entry in owned {
-            guard let marker = entry.agentMarker else { continue }
+            guard let rawMarker = entry.agentMarker else { continue }
+            let marker = sessionIdentity(rawMarker)
             let chain = [entry] + (ancestors[entry.pid] ?? [])
             // Code mode hosts are implementation helpers, not proof that a CLI session is alive.
             if let agent = chain.first(where: { agents[$0.pid] == marker.kind && !isAgentHelper($0) }) {
-                agentMarkers[agent.pid, default: []].insert(marker)
                 if markerAgents[marker] == nil || agent.pid < markerAgents[marker]!.pid {
                     markerAgents[marker] = agent
                 }
             }
+            if let pid = rawMarker.hostPID, pid > 1, let host = byPID[pid],
+               agents[pid] == marker.kind, !isAgentHelper(host),
+               host.startedSeconds < entry.startedSeconds ||
+                (host.startedSeconds == entry.startedSeconds && host.startedMicroseconds <= entry.startedMicroseconds) {
+                if hostAgents[marker] == nil || pid < hostAgents[marker]!.pid { hostAgents[marker] = host }
+            }
         }
+        // An explicit validated host wins even when the orchestrator detached its children.
+        markerAgents.merge(hostAgents, uniquingKeysWith: { _, host in host })
+        for (marker, agent) in markerAgents { agentMarkers[agent.pid, default: []].insert(marker) }
         struct Identity {
             let kind: AgentKind
             let marker: AgentMarker?
@@ -73,7 +92,8 @@ enum Attribution {
         for entry in owned {
             let chain = [entry] + (ancestors[entry.pid] ?? [])
             let identity: Identity?
-            if let marker = chain.first(where: { $0.agentMarker != nil })?.agentMarker {
+            if let rawMarker = chain.first(where: { $0.agentMarker != nil })?.agentMarker {
+                let marker = sessionIdentity(rawMarker)
                 identity = Identity(kind: marker.kind, marker: marker, agent: markerAgents[marker])
             } else if let agent = chain.first(where: { agents[$0.pid] != nil && !isAgentHelper($0) }),
                       let kind = agents[agent.pid] {
@@ -93,7 +113,7 @@ enum Attribution {
         for key in identities.keys.sorted() {
             let identity = identities[key]!
             let entries = (members[key] ?? []).sorted { $0.pid < $1.pid }
-            let file = identity.marker.flatMap { sessionFiles[$0] }
+            let file = identity.marker.flatMap { filesBySession[$0] }
             let state: SessionState
             if let agent = identity.agent {
                 if isCodexDaemon(agent) {
@@ -256,7 +276,7 @@ enum Attribution {
 
     /// Only path and mtime are inspected. Session file contents are never opened.
     static func sessionFiles(for processes: [ProcessEntry]) -> [AgentMarker: SessionFile] {
-        let wanted = Set(processes.compactMap(\.agentMarker))
+        let wanted = Set(processes.compactMap { $0.agentMarker.map(sessionIdentity) })
         guard !wanted.isEmpty else { return [:] }
         let manager = FileManager.default
         let home = manager.homeDirectoryForCurrentUser

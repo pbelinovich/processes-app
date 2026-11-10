@@ -20,6 +20,7 @@ enum AttributionChecks {
     static func main() {
         checkDisplayNames()
         checkNoiseAndApplicationExclusion()
+        checkDetachedHosts()
         let liveClaude = Attribution.build(from: [
             entry(100, "claude"),
             entry(101, "npm exec", parent: 100, command: "npm exec @playwright/mcp --browser chrome", marker: claude),
@@ -224,6 +225,65 @@ enum AttributionChecks {
         let root = Attribution.build(from: [entry(1_200, "server", marker: claude, cwd: "/")], now: now)
         precondition(root.leftoverSessions[0].projectPath.isEmpty && root.leftoverSessions[0].projectName == "—")
         print("PASS: 20-second active noise boundary, server/browser/MCP exemptions, wrapper stop tree, ended/idle preservation, own/app-copy exclusion, root project normalization")
+    }
+
+    static func checkDetachedHosts() {
+        let marker = AgentMarker(kind: .claude, sessionID: "detached-synthetic", hostPID: 2_000)
+        let plain = AgentMarker(kind: .claude, sessionID: marker.sessionID)
+        let host = entry(2_000, "claude", cwd: "/host-project")
+        let detached = entry(2_001, "node", command: "node /cache/node_modules/@playwright/mcp/cli.js", marker: marker)
+        let unlinked = entry(2_002, "Python", command: "python3 /project/_supervise.py", marker: plain)
+        let snapshot = Attribution.build(from: [host, detached, unlinked], now: now)
+        precondition(snapshot.leftoverSessions.isEmpty && snapshot.liveSessions.count == 1)
+        let session = snapshot.liveSessions[0]
+        precondition(session.agentPID == host.pid && session.state == .active && session.projectPath == "/host-project")
+        precondition(session.sessionID == marker.sessionID && session.processes.count == 2)
+        precondition(Set(session.processes.flatMap(\.tree).map(\.pid)) == [2_001, 2_002])
+        // PID ordering/input ordering and host metadata must not produce extra pid-only sessions.
+        let reversed = Attribution.build(from: [unlinked, detached, host], now: now)
+        precondition(reversed.liveSessions.count == 1 && reversed.leftoverSessions.isEmpty)
+        precondition(reversed.liveSessions[0].agentPID == host.pid)
+
+        let absent = Attribution.build(from: [detached, unlinked], now: now)
+        precondition(absent.liveSessions.isEmpty && absent.leftoverSessions.count == 1)
+        precondition(absent.leftoverSessions[0].state == .ended && absent.leftoverSessions[0].agentPID == nil)
+        let reused = Attribution.build(from: [entry(2_000, "sleep"), detached], now: now)
+        precondition(reused.liveSessions.isEmpty && reused.leftoverSessions[0].state == .ended)
+        let wrongKind = Attribution.build(from: [entry(2_000, "codex"), detached], now: now)
+        precondition(wrongKind.leftoverSessions.count == 1 && wrongKind.leftoverSessions[0].state == .ended)
+        let newerHost = Attribution.build(from: [entry(2_000, "claude", started: 2), detached], now: now)
+        precondition(newerHost.leftoverSessions.count == 1 && newerHost.leftoverSessions[0].state == .ended)
+        let newerMicroseconds = Attribution.build(from: [entry(2_000, "claude", microseconds: 1), detached], now: now)
+        precondition(newerMicroseconds.leftoverSessions[0].state == .ended)
+        let foreignHost = ProcessEntry(pid: 2_000, name: "claude", owner: "foreign", uid: getuid() + 1,
+                                       startedSeconds: 1, startedMicroseconds: 0)
+        let foreign = Attribution.build(from: [foreignHost, detached], now: now)
+        precondition(foreign.liveSessions.isEmpty && foreign.leftoverSessions[0].state == .ended)
+
+        // The host mechanism is generic: future marker providers can attach a Kimi/Cursor host.
+        for (offset, kind) in [AgentKind.kimi, .cursor, .codex].enumerated() {
+            let pid = pid_t(2_100 + offset)
+            let future = AgentMarker(kind: kind, sessionID: "future-synthetic", hostPID: pid)
+            let futureSnapshot = Attribution.build(from: [entry(pid, kind.rawValue), entry(pid + 10, "sleep", marker: future)], now: now)
+            precondition(futureSnapshot.leftoverSessions.isEmpty && futureSnapshot.liveSessions.count == 1)
+            precondition(futureSnapshot.liveSessions[0].agentPID == pid)
+        }
+
+        let daemon = entry(2_200, "codex", command: "/home/app-server-daemon/bin/codex")
+        let threadHost = AgentMarker(kind: .codex, sessionID: "daemon-detached", hostPID: daemon.pid)
+        let threadPlain = AgentMarker(kind: .codex, sessionID: threadHost.sessionID)
+        let child = entry(2_201, "server", marker: threadHost, ports: ["8080"])
+        let canonicalMetadata = Attribution.build(from: [daemon, child], now: now,
+                                                 sessionFiles: [threadPlain: .init(modifiedAt: now)])
+        precondition(canonicalMetadata.liveSessions.count == 1 && canonicalMetadata.leftoverSessions.isEmpty)
+        let decoratedMetadata = Attribution.build(from: [daemon, child], now: now,
+                                                 sessionFiles: [threadHost: .init(modifiedAt: now)])
+        precondition(decoratedMetadata.liveSessions.count == 1 && decoratedMetadata.leftoverSessions.isEmpty)
+        let duplicateMetadata = Attribution.build(from: [daemon, child], now: now,
+                                                 sessionFiles: [threadPlain: .init(modifiedAt: now.addingTimeInterval(-1_200)),
+                                                                threadHost: .init(modifiedAt: now)])
+        precondition(duplicateMetadata.liveSessions.count == 1 && duplicateMetadata.leftoverSessions.isEmpty)
+        print("PASS: detached live/dead/reused/wrong-kind/foreign hosts, birth identity guard, mixed host/no-host single session, future kinds, canonical daemon metadata")
     }
 
 }

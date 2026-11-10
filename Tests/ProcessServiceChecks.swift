@@ -57,6 +57,7 @@ enum ProcessServiceChecks {
             precondition(child.terminationReason == .uncaughtSignal)
             precondition(child.terminationStatus == (force ? SIGKILL : SIGTERM))
         }
+        checkMessagingSocketParser()
         try await checkMarkersAndStopping()
         print("PASS: RSS, parent PID, PGID, command, cwd, TCP listener, whitelist parser, self/stale identity protection, inherited marker, child-first tree stop, TERM-to-KILL escalation")
     }
@@ -92,11 +93,15 @@ enum ProcessServiceChecks {
         let unrestricted = Process()
         unrestricted.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
         unrestricted.arguments = ["--marker-child"]
-        unrestricted.environment = ["CODEX_THREAD_ID": marker.sessionID, "UNRELATED_SECRET": "synthetic"]
+        unrestricted.environment = ["CODEX_THREAD_ID": marker.sessionID, "UNRELATED_SECRET": "synthetic",
+                                    "CLAUDE_CODE_SESSION_ID": "synthetic-host-child",
+                                    "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/synthetic/\(getpid()).sock"]
         try unrestricted.run()
         let unrestrictedEntry = ProcessService.snapshot().first { $0.pid == unrestricted.processIdentifier }!
         defer { try? ProcessService.terminate(unrestrictedEntry, force: true); unrestricted.waitUntilExit() }
         precondition(unrestrictedEntry.agentMarker == marker)
+        let inherited = ProcessService.processArguments(unrestrictedEntry.pid, capacity: ProcessService.argumentBufferCapacity())
+        precondition(inherited.markers.first { $0.kind == .claude }?.hostPID == getpid())
         let staleChild = ProcessEntry(pid: unrestrictedEntry.pid, name: "stale", owner: "synthetic", uid: getuid(),
                                       startedSeconds: unrestrictedEntry.startedSeconds + 1, startedMicroseconds: 0)
         let staleStop = await ProcessService.stop([staleChild], grace: 0)
@@ -151,6 +156,36 @@ enum ProcessServiceChecks {
 
         let protected = await ProcessService.stop([ProcessService.snapshot().first { $0.pid == getpid() }!], grace: 0)
         precondition(protected.failed[getpid()] != nil && protected.stopped.isEmpty && protected.killed.isEmpty)
+    }
+
+    static func checkMessagingSocketParser() {
+        func parse(_ environment: [String]) -> ProcessService.Arguments {
+            var bytes = withUnsafeBytes(of: Int32(1)) { Array($0) }
+            bytes += Array("/bin/sleep\0\0/bin/sleep\0".utf8)
+            for entry in environment { bytes += entry.utf8; bytes.append(0) }
+            bytes.append(0)
+            return ProcessService.parseArguments(bytes[...])
+        }
+        let key = "CLAUDE_CODE_MESSAGING_SOCKET="
+        for environment in [
+            [key + "/tmp/synthetic-private-prefix/14225.sock", "CLAUDE_CODE_SESSION_ID=synthetic"],
+            ["CLAUDE_CODE_SESSION_ID=synthetic", key + "/tmp/synthetic-private-prefix/14225.sock"]
+        ] {
+            let parsed = parse(environment)
+            precondition(parsed.marker == AgentMarker(kind: .claude, sessionID: "synthetic", hostPID: 14_225))
+            precondition(parsed.command == "/bin/sleep" && !parsed.command.contains("synthetic-private-prefix"))
+        }
+        let invalid = ["/tmp/not-numeric.sock", "/tmp/14225.sock.backup", "/tmp/.sock", "/tmp/0.sock", "/tmp/1.sock",
+                       "/tmp/-14225.sock", "/tmp/+14225.sock", "/tmp/14225x.sock", "/tmp/2147483648.sock",
+                       "/tmp/999999999999999999999999.sock", "/tmp/14225.sock/", "/tmp/ 14225.sock"]
+        for value in invalid {
+            precondition(parse(["CLAUDE_CODE_SESSION_ID=synthetic", key + value]).marker?.hostPID == nil)
+        }
+        precondition(parse([key + "/tmp/14225.sock"]).marker == nil)
+        let mixed = parse([key + "/tmp/14225.sock", "CODEX_THREAD_ID=codex-synthetic", "CLAUDE_CODE_SESSION_ID=claude-synthetic"])
+        precondition(mixed.markers.first { $0.kind == .codex }?.hostPID == nil)
+        precondition(mixed.markers.first { $0.kind == .claude }?.hostPID == 14_225)
+        print("PASS: byte-only socket PID extraction, key order, malformed/overflow PID rejection, kind isolation; socket values never decoded")
     }
 
     static func expectFailure(_ operation: () throws -> Void) {
