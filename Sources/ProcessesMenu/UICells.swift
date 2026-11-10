@@ -114,7 +114,7 @@ final class UISectionCell: NSTableCellView {
         super.init(frame: .zero)
         label.stringValue = title
         label.font = .systemFont(ofSize: 11, weight: success ? .regular : .semibold)
-        label.textColor = success ? .systemGreen : .systemOrange
+        label.textColor = success ? .systemGreen : buttonTitle != nil ? .systemOrange : .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
         addSubview(label)
         if let button {
@@ -134,6 +134,7 @@ final class UISectionCell: NSTableCellView {
         label.frame = NSRect(x: 24, y: (bounds.height - 16) / 2, width: bounds.width - 48 - (width > 0 ? width + 8 : 0), height: 16)
     }
     override func draw(_ dirtyRect: NSRect) {
+        guard success || button != nil else { return }
         (success ? NSColor.systemGreen : NSColor.systemOrange).withAlphaComponent(0.10).setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 12, dy: 0), xRadius: 6, yRadius: 6).fill()
     }

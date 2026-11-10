@@ -181,7 +181,11 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     func receive(_ result: AttributedSnapshot) {
         snapshot = result
         projectByPID = [:]
+        let leftovers = Set(result.leftoverSessions.map(\.id))
         for session in result.liveSessions + result.leftoverSessions {
+            if expandedSessions[session.id] == nil {
+                expandedSessions[session.id] = leftovers.contains(session.id) || session.uiPriority == 2
+            }
             for item in session.processes {
                 projectByPID[item.id] = session.projectPath
                 for entry in item.tree { projectByPID[entry.pid] = session.projectPath }
@@ -229,8 +233,12 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             let items = matchingProcesses(session)
             let projectMatches = (session.projectPath + " " + session.kind.displayName).localizedCaseInsensitiveContains(query)
             guard query.isEmpty || !items.isEmpty || projectMatches else { return }
-            if case .session = rows.last { rows.append(.gap) }
-            else if !rows.isEmpty, case .leftovers = rows.last {} else if !rows.isEmpty { rows.append(.gap) }
+            if let last = rows.last {
+                switch last {
+                case .leftovers, .message: break
+                default: rows.append(.gap)
+                }
+            }
             let expanded = query.isEmpty ? (expandedSessions[session.id] ?? (leftover || session.uiPriority == 2)) : (searchDisclosure[session.id] ?? true)
             rows.append(.session(session, expanded, leftover))
             if expanded {
@@ -366,7 +374,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             guard let self else { return }
             stoppingPIDs = []
             let total = result.stopped.count + result.killed.count
-            statusMessage = "Остановлено \(total) процесса, \(result.killed.count) принудительно"
+            statusMessage = "Остановлено: \(uiProcessCount(total)), \(result.killed.count) принудительно"
                 + (result.failed.isEmpty ? "" : " · ошибок: \(result.failed.count)")
             stopErrors = result.failed.isEmpty ? nil : result.failed.sorted { $0.key < $1.key }.map { "PID \($0.key): \($0.value)" }.joined(separator: "\n")
             stopTask = nil
@@ -425,4 +433,17 @@ extension AgentSession {
         if items.contains(where: { $0.role == .server || $0.role == .browser }) { return 2 }
         return items.contains(where: { $0.role != .mcp }) ? 1 : 0
     }
+}
+
+func uiProcessCount(_ count: Int) -> String {
+    let word: String
+    if (11...14).contains(count % 100) { word = "процессов" }
+    else {
+        switch count % 10 {
+        case 1: word = "процесс"
+        case 2...4: word = "процесса"
+        default: word = "процессов"
+        }
+    }
+    return "\(count) " + word
 }

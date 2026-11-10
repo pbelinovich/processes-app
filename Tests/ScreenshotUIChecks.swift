@@ -32,7 +32,7 @@ enum ScreenshotUIChecks {
             guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
             try png.write(to: URL(fileURLWithPath: output).appendingPathComponent(name + ".png"))
         }
-        func render(_ name: String, snapshot: AttributedSnapshot, dark: Bool = true, query: String = "", all: Bool = false, expandedPID: pid_t? = nil, hoverPID: pid_t? = nil, grid: Bool = false) throws {
+        func render(_ name: String, snapshot: AttributedSnapshot, dark: Bool = true, query: String = "", all: Bool = false, expandedPID: pid_t? = nil, hoverPID: pid_t? = nil, grid: Bool = false, fullCommand: Bool = false) throws {
             let controller = ProcessListController()
             let window = NSWindow(contentViewController: controller)
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -41,6 +41,11 @@ enum ScreenshotUIChecks {
             controller.selectTab(all ? 1 : 0)
             controller.setQuery(query)
             if let expandedPID { controller.toggleProcess(expandedPID) }
+            if fullCommand {
+                let index = controller.rows.firstIndex { if case .details = $0 { return true }; return false }!
+                let cell = controller.tableView(controller.table, viewFor: nil, row: index)!
+                cell.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Показать всё" }!.performClick(nil)
+            }
             window.setContentSize(controller.preferredContentSize)
             controller.view.layoutSubtreeIfNeeded()
             controller.table.layoutSubtreeIfNeeded()
@@ -119,6 +124,13 @@ enum ScreenshotUIChecks {
         }
         precondition(processIDs().contains(91_011), "Expanded significant sessions include MCP")
         precondition(!processIDs().contains(91_004), "MCP-only session is collapsed by default")
+        let defaults = ProcessListController()
+        _ = defaults.view
+        defaults.receive(fixture)
+        let original = fixture.liveSessions.first { $0.id == "live-vite" }!
+        let nowEmpty = AgentSession(id: original.id, kind: original.kind, sessionID: original.sessionID, agentPID: original.agentPID, projectPath: original.projectPath, startedSeconds: original.startedSeconds, state: original.state, processes: [])
+        defaults.receive(AttributedSnapshot(liveSessions: [nowEmpty], leftoverSessions: [], otherServers: [], all: []))
+        precondition(defaults.rows.contains { if case .session(let session, let expanded, _) = $0 { return session.id == original.id && expanded }; return false }, "Initial disclosure state must survive changes to session processes")
         controller.activateRow(sessionRow("live-codex"))
         precondition(processIDs().contains(91_004))
         controller.receive(fixture)
@@ -126,6 +138,10 @@ enum ScreenshotUIChecks {
         controller.activateRow(sessionRow("live-vite"))
         controller.receive(fixture)
         precondition(!processIDs().contains(91_010), "Explicit collapse must survive snapshots")
+        let otherIndex = controller.rows.firstIndex { if case .other = $0 { return true }; return false }!
+        controller.activateRow(otherIndex)
+        controller.receive(fixture)
+        precondition(processIDs().contains(91_006), "Other servers disclosure survives refresh")
         controller.toggleProcess(91_001)
         controller.toggleProcess(91_015)
         precondition(controller.rows.filter { if case .details = $0 { return true }; return false }.count == 1, "Only one process may expand")
@@ -133,6 +149,35 @@ enum ScreenshotUIChecks {
             controller.setQuery(query)
             precondition(processIDs() == Set(expected.map { pid_t($0) }), "Search must reveal matching processes even in collapsed sessions")
         }
+        controller.setQuery("figma-mcp")
+        controller.activateRow(sessionRow("live-vite"))
+        precondition(processIDs().isEmpty, "Search headers still respond to collapse")
+        controller.receive(fixture)
+        precondition(processIDs().isEmpty, "Search collapse survives refresh")
+        controller.setQuery("")
+        precondition(!processIDs().contains(91_010), "Search disclosure must not overwrite ordinary disclosure")
+
+        var longEntry = UIFixtures.entry(91_020, "vite", ports: ["8000"], cwd: "/fixture/project")
+        longEntry.command = "/fixture/bin/vite " + Array(repeating: "--fixture-option=long-value", count: 64).joined(separator: " ")
+        let longItem = UIFixtures.item(longEntry, role: .server)
+        let longSession = UIFixtures.session("long-command", .codex, "project", minutes: 1, items: [longItem])
+        let longSnapshot = AttributedSnapshot(liveSessions: [longSession], leftoverSessions: [], otherServers: [], all: [longEntry])
+        let longController = ProcessListController()
+        _ = longController.view
+        longController.receive(longSnapshot)
+        longController.toggleProcess(longEntry.pid)
+        let detailRow = longController.rows.firstIndex { if case .details = $0 { return true }; return false }!
+        let detail = longController.tableView(longController.table, viewFor: nil, row: detailRow) as! InlineDetailsCell
+        let command = detail.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == longEntry.command }!
+        precondition(command.isSelectable && command.maximumNumberOfLines == 3)
+        let showAll = detail.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Показать всё" }!
+        precondition(!showAll.isHidden)
+        let initialHeight = longController.rows[detailRow].height
+        showAll.performClick(nil)
+        precondition(longController.rows[detailRow].height > initialHeight, "Show all expands the full command inline")
+        precondition(longController.preferredContentSize.height == 640, "Long details cap the window and scroll")
+        try render("command-preview-dark", snapshot: longSnapshot, expandedPID: 91_020)
+        try render("command-full-dark", snapshot: longSnapshot, expandedPID: 91_020, fullCommand: true)
         controller.selectTab(1)
         controller.setQuery("sessions-online-third/frontend")
         precondition(processIDs() == [91_001, 91_002], "All processes retains session project context")

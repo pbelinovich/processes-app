@@ -23,7 +23,7 @@ final class InlineDetailsCell: NSTableCellView {
         return full ? height : min(46, height)
     }
     static func height(for item: AttributedProcess, fullCommand: Bool) -> CGFloat {
-        let folder = min(32, max(16, textHeight(item.entry.workingDirectory, font: .systemFont(ofSize: 12))))
+        let folder = max(16, textHeight(item.entry.workingDirectory, font: .systemFont(ofSize: 12)))
         let ports = max(16, textHeight(item.entry.listeningPorts.map { ":" + $0 }.joined(separator: ", "), font: .systemFont(ofSize: 12)))
         let moreHeight: CGFloat = commandHeight(item, full: true) > 46 ? 22 : 0
         return 6 + folder + 4 + commandHeight(item, full: fullCommand) + moreHeight + 4 + 16 + 4 + ports + 4 + 16 + 8 + 24 + 8
@@ -34,16 +34,18 @@ final class InlineDetailsCell: NSTableCellView {
         self.fullCommand = fullCommand
         super.init(frame: .zero)
         let entry = item.entry
-        addField("Папка", entry.workingDirectory.isEmpty ? "Недоступна" : entry.workingDirectory, height: min(32, max(16, Self.textHeight(entry.workingDirectory, font: .systemFont(ofSize: 12)))))
+        addField("Папка", entry.workingDirectory.isEmpty ? "Недоступна" : entry.workingDirectory, height: max(16, Self.textHeight(entry.workingDirectory, font: .systemFont(ofSize: 12))))
         addField("Команда", entry.command.isEmpty ? "Недоступна" : entry.command, height: Self.commandHeight(item, full: fullCommand), mono: true)
         addField("PID / PPID", "\(entry.pid) / \(entry.parentPID)", height: 16)
         let ports = entry.listeningPorts.map { ":" + $0 }.joined(separator: ", ")
         addField("Порты", ports.isEmpty ? "—" : ports, height: max(16, Self.textHeight(ports, font: .systemFont(ofSize: 12))))
-        addField("Дерево", "\(item.tree.count) процессов", height: 16)
+        addField("Дерево", uiProcessCount(item.tree.count), height: 16)
         fields.last?.1.toolTip = item.tree.map { "\($0.displayName) · PID \($0.pid) ← \($0.parentPID)" }.joined(separator: "\n")
         more.title = fullCommand ? "Свернуть команду" : "Показать всё"
         more.isBordered = false
         more.font = .systemFont(ofSize: 11)
+        more.alignment = .left
+        more.attributedTitle = NSAttributedString(string: more.title, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.linkColor])
         more.target = self
         more.action = #selector(showAll)
         more.isHidden = Self.commandHeight(item, full: true) <= 46
