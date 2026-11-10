@@ -50,6 +50,10 @@ enum AgentKind: String, Sendable, CaseIterable {
 struct AgentMarker: Hashable, Sendable {
     let kind: AgentKind
     let sessionID: String
+    /// PID of the agent process that owns the session, when the environment names it
+    /// (Claude: CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/<pid>.sock). Lets detached children (PPID 1) of a live agent
+    /// stay attributed to a live session. Group sessions by (kind, sessionID), not by the whole marker.
+    var hostPID: pid_t? = nil
 }
 
 enum ProcessRole: Sendable {
