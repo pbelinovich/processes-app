@@ -9,14 +9,17 @@ enum AttributionChecks {
 
     static func entry(_ pid: pid_t, _ name: String, parent: pid_t = 1,
                       command: String = "", marker: AgentMarker? = nil,
-                      ports: [String] = [], cwd: String = "/project") -> ProcessEntry {
-        ProcessEntry(pid: pid, name: name, owner: "synthetic", uid: getuid(), startedSeconds: 1,
-                     startedMicroseconds: 0, parentPID: parent, processGroup: 99,
+                      ports: [String] = [], cwd: String = "/project", started: UInt64 = 1,
+                      microseconds: UInt64 = 0) -> ProcessEntry {
+        ProcessEntry(pid: pid, name: name, owner: "synthetic", uid: getuid(), startedSeconds: started,
+                     startedMicroseconds: microseconds, parentPID: parent, processGroup: 99,
                      command: command.isEmpty ? name : command, listeningPorts: ports,
                      workingDirectory: cwd, agentMarker: marker)
     }
 
     static func main() {
+        checkDisplayNames()
+        checkNoiseAndApplicationExclusion()
         let liveClaude = Attribution.build(from: [
             entry(100, "claude"),
             entry(101, "npm exec", parent: 100, command: "npm exec @playwright/mcp --browser chrome", marker: claude),
@@ -71,6 +74,8 @@ enum AttributionChecks {
         precondition(browser.leftoverSessions[0].processes[0].tree.count == 6)
         precondition(Attribution.role(entry(600, "headless_shell")) == .browser)
         precondition(Attribution.role(entry(603, "npm", command: "npm exec @playwright/mcp --browser firefox")) == .mcp)
+        precondition(Attribution.role(entry(605, "node", command: "\"npm exec @playwright/mcp --browser chrome\"")) == .mcp)
+        precondition(Attribution.role(entry(606, "zsh", command: "zsh -c \"echo inspecting @playwright/mcp\"")) == .helper)
         precondition(!Attribution.isCodexDaemon(entry(604, "codex", command: "codex exec inspect /app-server-daemon/log")))
         precondition(Attribution.role(entry(601, "firefox", command: "/cache/ms-playwright/firefox/firefox")) == .browser)
         precondition(Attribution.role(entry(602, "MiniBrowser", command: "/cache/ms-playwright/webkit/pw_run.sh")) == .browser)
@@ -127,4 +132,98 @@ enum AttributionChecks {
         precondition(cyclic.leftoverSessions[0].processes.flatMap(\.tree).count == 2)
         print("PASS: live Claude/MCP, orphan Codex/server wrappers, daemon mtime, manual server, browser helpers, CLI ancestry, session isolation, project fallback, cyclic parents")
     }
+    static func checkDisplayNames() {
+        let cases: [(String, String, String)] = [
+            ("node", "node --env-file=.env ./node_modules/.bin/vite --host 127.0.0.1 --port 8000", "vite"),
+            ("npm exec", "npm exec @playwright/mcp@0.0.83 --headless", "playwright-mcp"),
+            ("node", "node /cache/node_modules/.bin/playwright-mcp", "playwright-mcp"),
+            ("node", "node /cache/node_modules/@playwright/mcp/cli.js --browser chrome", "playwright-mcp"),
+            ("node", "node /cache/node_modules/vite/bin/vite.js --port 8000", "vite"),
+            ("node", "node /cache/node_modules/next/dist/bin/next dev --port 3000", "next dev"),
+            ("node", "node /cache/node_modules/tsx/dist/cli.mjs watch ./server.ts", "tsx watch"),
+            ("python3", "python3 -m http.server 8080", "http.server"),
+            ("Python", "/opt/Python -I /project/_supervise.py --secret never-show-this", "_supervise.py"),
+            ("Python", "/opt/Python.app/Contents/MacOS/Python -I /project/_supervise.py", "_supervise.py"),
+            ("python3.14", "python3.14 -u -m uvicorn app:main --host 127.0.0.1", "uvicorn"),
+            ("python3", "python3 -m pytest /project/tests --verbose", "pytest"),
+            ("python3", "python3 -X dev /project/worker.py --password never-show-this", "worker.py"),
+            ("ruby", "ruby -r json /project/worker.rb --password never-show-this", "worker.rb"),
+            ("java", "java -Xmx512m -jar /project/service.jar --token never-show-this", "service"),
+            ("java", "java -cp /project/classes com.example.Server --port 9000", "com.example.Server"),
+            ("bun", "bun run /project/server.ts --port 8000", "server.ts"),
+            ("deno", "deno run --allow-net /project/server.ts --port 8000", "server.ts"),
+            ("npx", "npx -y @playwright/mcp@0.0.83 --headless", "playwright-mcp"),
+            ("pnpm", "pnpm exec next dev --port 3000", "next dev"),
+            ("pnpm", "pnpm dlx @playwright/mcp --headless", "playwright-mcp"),
+            ("yarn", "yarn exec tsx watch ./server.ts", "tsx watch"),
+            ("npm", "npm exec --package=@playwright/mcp -- playwright-mcp --headless", "playwright-mcp"),
+            ("npx", "npx --cache /cache -p @playwright/mcp playwright-mcp", "playwright-mcp"),
+            ("npm run dev", "npm run dev -- --port 3000", "npm run dev"),
+            ("node", "node --env-file .env --require /project/setup.js ./server.js --port 8080", "server"),
+            ("node", "node --loader=tsx /project/server.ts --auth never-show-this", "server.ts"),
+            ("node", "node --eval \"never-show-this\"", "node"),
+            ("python3", "python3 -c \"never-show-this\"", "python3"),
+            ("node", "node --unknown-option never-show-this /project/server.js", "node"),
+            ("npm", "npm exec --unknown-option never-show-this vite", "npm"),
+            ("node", "node \"/project with spaces/server.js\" --port 8000", "server"),
+            ("Google Chrome Helper", "\"/Applications/Google Chrome for Testing.app/Contents/Frameworks/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper\" --type=renderer", "Google Chrome for Testing"),
+            ("Firefox", "/Applications/Firefox.app/Contents/MacOS/firefox --headless", "Firefox"),
+            ("vite", "/project/node_modules/.bin/vite preview --port 8000", "vite preview"),
+            ("pytest", "/project/.venv/bin/pytest --verbose /project/tests", "pytest"),
+            ("sleep", "/bin/sleep 60", "sleep"),
+            ("node", "\"npm exec @playwright/mcp --headless\"", "playwright-mcp"),
+            ("node", "\"npm exec @playwright/mcp@0.0.83\" \"\" \"\"", "playwright-mcp"),
+            ("node", "\"node /cache/node_modules/.bin/vite --host 127.0.0.1\"", "vite"),
+            ("fallback", "", "fallback")
+        ]
+        for (index, item) in cases.enumerated() {
+            var process = entry(10_000, item.0, command: item.1)
+            process.command = item.1
+            let result = process.displayName
+            precondition(result == item.2, "displayName case \(index): expected \(item.2), got \(result)")
+            precondition(result.count <= 32 && !result.contains("/") && !result.contains("never-show-this"))
+        }
+        let long = String(repeating: "Ж", count: 40)
+        precondition(entry(10_001, long, command: "").displayName.count == 32)
+        print("PASS: displayName table (\(cases.count) command forms), 32-character limit, no paths/option values")
+    }
+
+    static func checkNoiseAndApplicationExclusion() {
+        let tree = [
+            entry(1_000, "claude", marker: claude),
+            entry(1_001, "sed", parent: 1_000, marker: claude, started: 9_995),
+            entry(1_002, "cut", parent: 1_000, marker: claude, started: 9_980, microseconds: 1),
+            entry(1_003, "sleep", parent: 1_000, marker: claude, started: 9_980),
+            entry(1_004, "sh", parent: 1_000, marker: claude, started: 9_999),
+            entry(1_005, "chromium", parent: 1_000, marker: claude, started: 9_999),
+            entry(1_006, "node", parent: 1_000, command: "node /cache/node_modules/@playwright/mcp/cli.js", marker: claude, started: 9_999),
+            entry(1_007, "server", parent: 1_000, marker: claude, ports: ["8000"], started: 9_999),
+            entry(1_008, "sh", parent: 1_000, marker: claude, started: 9_999),
+            entry(1_009, "vite", parent: 1_008, marker: claude, ports: ["8001"], started: 9_999)
+        ]
+        let active = Attribution.build(from: tree, now: now)
+        let visible = Set(active.liveSessions[0].processes.map(\.id))
+        precondition(visible == [1_003, 1_005, 1_006, 1_007, 1_009])
+        precondition(active.liveSessions[0].processes.first { $0.id == 1_009 }!.tree.contains { $0.pid == 1_008 })
+        let ended = Attribution.build(from: Array(tree.dropFirst()), now: now)
+        precondition(ended.leftoverSessions[0].processes.contains { $0.id == 1_001 })
+        precondition(ended.leftoverSessions[0].processes.contains { $0.id == 1_002 })
+        precondition(ended.leftoverSessions[0].processes.contains { $0.id == 1_004 })
+        var idleTree = tree.map { entry -> ProcessEntry in var changed = entry; changed.agentMarker = codex; return changed }
+        idleTree[0] = entry(1_000, "codex", command: "/home/app-server-daemon/bin/codex", marker: codex)
+        let idle = Attribution.build(from: idleTree, now: now, sessionFiles: [codex: .init(modifiedAt: now.addingTimeInterval(-1_200))])
+        precondition(idle.leftoverSessions[0].state == .idle(seconds: 1_200))
+        precondition(idle.leftoverSessions[0].processes.contains { $0.id == 1_001 })
+
+        let appCopies = [entry(getpid(), "checks", marker: claude),
+                         entry(1_100, "ProcessesMenu", command: "/Applications/ProcessesMenu.app/Contents/MacOS/ProcessesMenu", marker: claude, ports: ["8000"]),
+                         entry(1_101, "renamed", command: "\"/project with spaces/ProcessesMenu\"", marker: claude)]
+        let excluded = Attribution.build(from: appCopies, now: now)
+        precondition(excluded.liveSessions.isEmpty && excluded.leftoverSessions.isEmpty && excluded.otherServers.isEmpty)
+        precondition(excluded.all.count == appCopies.count)
+        let root = Attribution.build(from: [entry(1_200, "server", marker: claude, cwd: "/")], now: now)
+        precondition(root.leftoverSessions[0].projectPath.isEmpty && root.leftoverSessions[0].projectName == "—")
+        print("PASS: 20-second active noise boundary, server/browser/MCP exemptions, wrapper stop tree, ended/idle preservation, own/app-copy exclusion, root project normalization")
+    }
+
 }

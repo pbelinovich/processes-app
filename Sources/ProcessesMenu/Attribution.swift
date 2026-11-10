@@ -2,6 +2,14 @@ import Foundation
 import Darwin
 
 enum Attribution {
+    /// Active-session transient commands become visible only after this age.
+    static let activeProcessMinimumAge: TimeInterval = 20
+
+    static func isApplicationProcess(_ entry: ProcessEntry) -> Bool {
+        entry.pid == getpid() || (executable(entry.command) as NSString).lastPathComponent == "ProcessesMenu" ||
+            (entry.command.isEmpty && entry.name == "ProcessesMenu")
+    }
+
     struct SessionFile: Sendable {
         let modifiedAt: Date
         var projectPath: String = ""
@@ -20,7 +28,7 @@ enum Attribution {
 
     static func build(from processes: [ProcessEntry], now: Date,
                       sessionFiles: [AgentMarker: SessionFile]) -> AttributedSnapshot {
-        let owned = processes.filter { $0.uid == getuid() }
+        let owned = processes.filter { $0.uid == getuid() && !isApplicationProcess($0) }
         let byPID = Dictionary(owned.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
         let agents = Dictionary(owned.compactMap { entry in
             agentKind(entry).map { (entry.pid, $0) }
@@ -85,7 +93,6 @@ enum Attribution {
         for key in identities.keys.sorted() {
             let identity = identities[key]!
             let entries = (members[key] ?? []).sorted { $0.pid < $1.pid }
-            let items = grouped(entries)
             let file = identity.marker.flatMap { sessionFiles[$0] }
             let state: SessionState
             if let agent = identity.agent {
@@ -96,25 +103,35 @@ enum Attribution {
                     state = age.map { $0 <= 600 ? .active : .idle(seconds: Int($0)) } ?? .idle(seconds: 0)
                 } else { state = .active }
             } else { state = .ended }
+            let items = grouped(entries).filter { item in
+                guard state == .active, item.role == .other || item.role == .helper,
+                      item.entry.listeningPorts.isEmpty else { return true }
+                let started = Double(item.entry.startedSeconds) + Double(item.entry.startedMicroseconds) / 1_000_000
+                return now.timeIntervalSince1970 - started >= activeProcessMinimumAge
+            }
             let project = [identity.agent?.workingDirectory ?? "",
                            entries.first(where: { !$0.workingDirectory.isEmpty })?.workingDirectory ?? "",
                            file?.projectPath ?? ""].first(where: { !$0.isEmpty }) ?? ""
             let session = AgentSession(id: key, kind: identity.kind, sessionID: identity.marker?.sessionID,
-                                       agentPID: identity.agent?.pid, projectPath: project,
+                                       agentPID: identity.agent?.pid, projectPath: project == "/" ? "" : project,
                                        startedSeconds: ([identity.agent].compactMap { $0 } + entries).map(\.startedSeconds).min() ?? 0,
                                        state: state, processes: items)
             if state == .active { live.append(session) }
             else if !items.isEmpty { leftover.append(session) }
         }
-        let other = processes.filter { !assigned.contains($0.pid) && !$0.listeningPorts.isEmpty }
+        let other = processes.filter { !isApplicationProcess($0) && !assigned.contains($0.pid) && !$0.listeningPorts.isEmpty }
             .map { AttributedProcess(entry: $0, role: .server, depth: 0, tree: [$0]) }
         return AttributedSnapshot(liveSessions: live, leftoverSessions: leftover,
                                   otherServers: other, all: processes)
     }
 
     static func executable(_ command: String) -> String {
-        if command.first == "\"" { return String(command.dropFirst().prefix { $0 != "\"" }) }
-        return command.split(separator: " ").first.map(String.init) ?? ""
+        let first: String
+        if command.first == "\"" { first = String(command.dropFirst().prefix { $0 != "\"" }) }
+        else { first = command.split(separator: " ").first.map(String.init) ?? "" }
+        // setproctitle can replace argv[0] with "npm exec … --browser chrome".
+        // Its arguments must not make npm itself look like a Chrome executable.
+        return ProcessDisplayName.launchers.first(where: { first.hasPrefix($0 + " ") }) ?? first
     }
 
     static func agentKind(_ entry: ProcessEntry) -> AgentKind? {
@@ -144,8 +161,12 @@ enum Attribution {
             ((nameAndExecutable.contains("webkit") || nameAndExecutable.contains("firefox")) &&
              (text.contains("playwright") || text.contains("ms-playwright"))) { return .browser }
         if !entry.listeningPorts.isEmpty { return .server }
-        if text.contains("@playwright/mcp") || text.contains("mcp-server") || text.contains("/mcp/") ||
-            text.contains(" mcp ") || text.hasSuffix(" mcp") { return .mcp }
+        let shellNames = ["sh", "bash", "zsh", "fish"]
+        let isShell = shellNames.contains((executable(entry.command) as NSString).lastPathComponent.lowercased()) || shellNames.contains(entry.name.lowercased())
+        // Shell payloads often contain inspection/test source mentioning MCP. They are wrappers,
+        // not MCP servers; an actual MCP child still supplies the group's representative.
+        if !isShell && (text.contains("@playwright/mcp") || text.contains("mcp-server") || text.contains("/mcp/") ||
+            text.contains(" mcp ") || text.hasSuffix(" mcp")) { return .mcp }
         let name = entry.name.lowercased()
         if ["sh", "bash", "zsh", "fish", "npm", "npx", "env"].contains(name) ||
             text.hasPrefix("npm run ") || text.hasPrefix("npm exec ") { return .helper }
@@ -331,7 +352,151 @@ extension ProcessService {
 }
 
 extension ProcessEntry {
-    /// Human name for the UI derived from the command (e.g. `vite`, `next dev`, `playwright-mcp`, `uvicorn app:main`).
-    /// STUB — implemented by the core worker; the UI worker must use it but not edit it.
-    var displayName: String { name }
+    /// Short task/application name. Positional values and arbitrary option values are never shown.
+    var displayName: String { ProcessDisplayName.name(command: command, fallback: name) }
+}
+
+private enum ProcessDisplayName {
+    static let launchers = ["npm", "npx", "pnpm", "yarn", "node", "nodejs", "bun", "bunx", "deno", "python", "python3", "ruby", "java"]
+    /// Tokenize the quoted argv representation produced by ProcessService without executing a shell.
+    static func words(_ command: String) -> [String] {
+        var result: [String] = []
+        var word = ""
+        var quote: Character?
+        var escaped = false
+        for character in command {
+            if escaped { word.append(character); escaped = false; continue }
+            if character == "\\" && quote != "'" { escaped = true; continue }
+            if let current = quote {
+                if character == current { quote = nil } else { word.append(character) }
+            } else if character == "\"" || character == "'" { quote = character }
+            else if character.isWhitespace {
+                if !word.isEmpty { result.append(word); word = "" }
+                if result.count >= 32 { break }
+            } else { word.append(character) }
+        }
+        if escaped { word.append("\\") }
+        if !word.isEmpty { result.append(word) }
+        return result
+    }
+
+    static func name(command: String, fallback: String) -> String {
+        var arguments = words(command)
+        // npm/setproctitle may flatten the whole command into argv[0]. Only unwrap known
+        // launchers; a real executable path containing spaces remains one token.
+        if let title = arguments.first, launchers.contains(where: { title.hasPrefix($0 + " ") }) {
+            arguments = words(title) + arguments.dropFirst()
+        }
+        guard let executable = arguments.first else { return shortened(fallback) }
+        let binary = (executable as NSString).lastPathComponent
+        let lower = binary.lowercased()
+        let args = Array(arguments.dropFirst())
+        let label: String?
+        if ["npm", "npx", "pnpm", "yarn", "bunx"].contains(lower) {
+            label = runner(lower, args)
+        } else if lower.hasPrefix("python") || ["node", "nodejs", "bun", "deno", "ruby", "java"].contains(lower) {
+            label = interpreter(lower, args)
+        } else if let app = executable.split(separator: "/").first(where: { $0.hasSuffix(".app") }) {
+            label = String(app.dropLast(4))
+        } else {
+            label = withSubcommand(script(binary), args)
+        }
+        return shortened(label?.isEmpty == false ? label! : fallback)
+    }
+
+    static func shortened(_ value: String) -> String {
+        let clean = value.filter { !$0.isNewline && !($0.asciiValue.map({ $0 < 32 || $0 == 127 }) ?? false) }
+        return clean.count <= 32 ? clean : String(clean.prefix(31)) + "…"
+    }
+
+    /// Use package identity for generic JS entrypoints such as vite/bin/vite.js and mcp/cli.js.
+    static func script(_ path: String) -> String {
+        let components = path.split(separator: "/").map(String.init)
+        if let index = components.lastIndex(of: "node_modules"), index + 1 < components.count {
+            let package = components[index + 1]
+            if package == "@playwright", index + 2 < components.count, components[index + 2] == "mcp" { return "playwright-mcp" }
+            if package != ".bin" {
+                if package.hasPrefix("@"), index + 2 < components.count { return packageName(components[index + 2]) }
+                return packageName(package)
+            }
+        }
+        let basename = (path as NSString).lastPathComponent
+        if basename == "cli.js" || basename == "index.js" || basename == "main.js" {
+            let parent = ((path as NSString).deletingLastPathComponent as NSString).lastPathComponent
+            if !parent.isEmpty && parent != "." { return packageName(parent) }
+        }
+        // Python/Ruby filenames retain their extension; JS CLI extensions add little information.
+        if ["js", "mjs", "cjs", "jar"].contains((basename as NSString).pathExtension) {
+            return (basename as NSString).deletingPathExtension
+        }
+        return packageName(basename)
+    }
+
+    static func packageName(_ value: String) -> String {
+        if (value == "@playwright/mcp" || value.hasPrefix("@playwright/mcp@")) { return "playwright-mcp" }
+        let unscoped = value.split(separator: "/").last.map(String.init) ?? value
+        return unscoped.split(separator: "@", maxSplits: 1).first.map(String.init) ?? unscoped
+    }
+
+    static func withSubcommand(_ label: String, _ args: [String]) -> String {
+        let allowed: [String: Set<String>] = [
+            "next": ["dev", "start", "build"], "tsx": ["watch"],
+            "vite": ["preview", "build"], "playwright": ["test", "show-report", "install"],
+            "astro": ["dev", "preview", "build"], "nuxt": ["dev", "start", "build"],
+            "vitest": ["run", "watch"], "webpack": ["serve", "watch"]
+        ]
+        if let first = args.first, allowed[label]?.contains(first) == true { return label + " " + first }
+        return label
+    }
+
+    static func runner(_ binary: String, _ args: [String]) -> String? {
+        var index = 0
+        var package: String?
+        while index < args.count {
+            let arg = args[index]
+            if arg == "--package" || arg == "-p" {
+                guard index + 1 < args.count else { return nil }
+                package = packageName(args[index + 1]); index += 2; continue
+            }
+            if arg.hasPrefix("--package=") { package = packageName(String(arg.dropFirst(10))); index += 1; continue }
+            if ["--cache", "--prefix", "--cwd", "--registry", "--userconfig", "-C"].contains(arg) { index += 2; continue }
+            if ["--", "-y", "--yes", "--no", "--silent", "--offline", "--prefer-offline", "--ignore-scripts"].contains(arg) ||
+                (arg.hasPrefix("--") && arg.contains("=")) || arg == "exec" || arg == "dlx" { index += 1; continue }
+            if arg.hasPrefix("-") { return package } // unknown option arity: never show its possible value
+            if arg == "run" || arg == "run-script" {
+                guard index + 1 < args.count else { return nil }
+                // npm script names are command identities, not values of application options.
+                return binary + " run " + script(args[index + 1])
+            }
+            let label = package ?? (arg.hasPrefix("@") ? packageName(arg) : script(arg))
+            return withSubcommand(label, Array(args.dropFirst(index + 1)))
+        }
+        return package
+    }
+
+    static func interpreter(_ binary: String, _ args: [String]) -> String? {
+        var index = 0
+        while index < args.count {
+            let arg = args[index]
+            if ["-e", "--eval", "--print", "-p", "-c"].contains(arg) || arg.hasPrefix("--eval=") { return nil }
+            if arg == "-m", binary.hasPrefix("python") {
+                guard index + 1 < args.count else { return nil }
+                return withSubcommand(packageName(args[index + 1]), Array(args.dropFirst(index + 2)))
+            }
+            if arg == "-jar", binary == "java" {
+                guard index + 1 < args.count else { return nil }
+                return script(args[index + 1])
+            }
+            if ["--env-file", "--require", "-r", "--loader", "--import", "--conditions", "--inspect-port",
+                "--cwd", "--title", "--config", "-C", "-X", "-W", "-cp", "-classpath", "--class-path", "--module-path"].contains(arg) { index += 2; continue }
+            if ["--", "-I", "-u", "-B", "-E", "-s", "-S", "--watch", "--no-warnings", "--enable-source-maps", "--trace-warnings", "--inspect", "--inspect-brk", "-A", "--allow-net", "--allow-read", "--allow-env"].contains(arg) ||
+                (arg.hasPrefix("--") && arg.contains("=")) ||
+                (binary == "java" && (arg.hasPrefix("-X") || arg.hasPrefix("-D"))) ||
+                (binary == "deno" && ["run", "task"].contains(arg)) ||
+                (binary == "bun" && ["run", "x"].contains(arg)) { index += 1; continue }
+            if arg.hasPrefix("-") { return nil }
+            return withSubcommand(script(arg), Array(args.dropFirst(index + 1)))
+        }
+        return nil
+    }
 }
