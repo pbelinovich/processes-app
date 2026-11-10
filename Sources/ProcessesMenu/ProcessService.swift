@@ -1,31 +1,6 @@
 import Foundation
 import Darwin
 
-struct ProcessEntry: Identifiable, Sendable {
-    let pid: pid_t
-    let name: String
-    let owner: String
-    let uid: uid_t
-    let startedSeconds: UInt64
-    let startedMicroseconds: UInt64
-    var parentPID: pid_t = 0
-    var residentBytes: UInt64? = nil
-    var command: String = ""
-    var listeningPorts: [String] = []
-    var workingDirectory: String = ""
-    var id: pid_t { pid }
-    var canTerminate: Bool { pid > 1 && pid != getpid() && uid == getuid() }
-    var memoryLabel: String {
-        residentBytes.map { String(format: "%.1f МБ", Double($0) / 1_048_576) } ?? "— МБ"
-    }
-    var ageLabel: String {
-        let seconds = max(0, Int(Date().timeIntervalSince1970) - Int(startedSeconds))
-        if seconds >= 86400 { return "\(seconds / 86400) д \(seconds % 86400 / 3600) ч" }
-        if seconds >= 3600 { return "\(seconds / 3600) ч \(seconds % 3600 / 60) мин" }
-        return "\(seconds / 60) мин"
-    }
-}
-
 enum ProcessService {
     static func details(_ pid: pid_t) -> proc_bsdinfo? {
         var info = proc_bsdinfo()
