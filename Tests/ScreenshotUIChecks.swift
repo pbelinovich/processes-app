@@ -22,7 +22,7 @@ enum ScreenshotUIChecks {
     static func main() async throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
-        let output = ProcessInfo.processInfo.environment["PROCESSES_SCREENSHOT_DIR"] ?? "/tmp/processes-ui-03"
+        let output = ProcessInfo.processInfo.environment["PROCESSES_SCREENSHOT_DIR"] ?? "/tmp/processes-ui-04"
         try FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
 
         func cache(_ view: NSView, name: String, rect: NSRect? = nil) throws {
@@ -66,6 +66,14 @@ enum ScreenshotUIChecks {
                 let total = controller.rows.reduce(CGFloat.zero) { $0 + $1.height }
                 precondition(total <= controller.table.enclosingScrollView!.contentSize.height + 1, "Default six-session fixture must fit")
                 try cache(controller.view, name: "agents-dark-crop", rect: NSRect(x: 0, y: controller.view.bounds.height - 300, width: 560, height: 214))
+                for row in controller.rows.indices where row > 0 {
+                    if case .gap = controller.rows[row] {
+                        let previous = controller.table.rect(ofRow: row - 1)
+                        let next = controller.table.rect(ofRow: row + 1)
+                        precondition(abs(next.minY - previous.maxY - 4) < 0.01, "Session groups must have exactly 4pt between row bounds")
+                    }
+                    if case .process = controller.rows[row] { precondition(controller.table.rect(ofRow: row).height == 24) }
+                }
                 for row in controller.rows.indices {
                     guard let cell = controller.table.view(atColumn: 0, row: row, makeIfNecessary: true) else { continue }
                     cell.layoutSubtreeIfNeeded()
@@ -80,6 +88,13 @@ enum ScreenshotUIChecks {
                         precondition(abs(process.convert(process.nameLabel.frame.origin, to: controller.view).x - 62) < 0.1)
                         precondition(abs(process.convert(process.memoryLabel.frame, to: controller.view).maxX - 548) < 0.1)
                         precondition(abs(process.convert(process.stop.frame, to: controller.view).maxX - 548) < 0.1)
+                        let nameBaseline = process.nameLabel.alignmentRect(forFrame: process.nameLabel.frame).minY + process.nameLabel.firstBaselineOffsetFromTop
+                        for port in process.subviews.compactMap({ $0 as? PortButton }) {
+                            let portBaseline = port.alignmentRect(forFrame: port.frame).minY + port.cell!.titleRect(forBounds: port.bounds).minY + port.firstBaselineOffsetFromTop
+                            precondition(abs(nameBaseline - portBaseline) < 0.01, "Port links must share the process-name baseline")
+                            print("PASS: rendered name/link baseline \(nameBaseline)pt")
+                        }
+                        precondition(process.subviews.compactMap { $0 as? NSTextField }.count == 2, "Process rows must not repeat session metadata")
                     }
                 }
                 print("PASS: grid 12/28/42/62/548; content \(total)pt / \(controller.table.enclosingScrollView!.contentSize.height)pt; window \(controller.preferredContentSize.height)pt")

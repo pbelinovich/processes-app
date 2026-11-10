@@ -15,16 +15,13 @@ enum ProcessRow {
         switch self {
         case .leftovers: 30
         case .session, .other: 28
-        case .process(_, let session): session?.state == .ended || isIdle(session?.state) ? 38 : 24
+        case .process: 24
         case .details(let item, let full): InlineDetailsCell.height(for: item, fullCommand: full)
         case .message: 26
         case .gap: 4
         }
     }
-    private func isIdle(_ state: SessionState?) -> Bool {
-        if case .idle = state { return true }
-        return false
-    }
+
 }
 
 @MainActor

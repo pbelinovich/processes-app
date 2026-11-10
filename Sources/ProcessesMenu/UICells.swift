@@ -147,7 +147,6 @@ final class ProcessCell: HoverCell {
     let nameLabel = NSTextField(labelWithString: "")
     let memoryLabel = NSTextField(labelWithString: "")
     let stop = NSButton(title: "Остановить", target: nil, action: nil)
-    private let metadata = NSTextField(labelWithString: "")
     private var ports: [NSButton] = []
     private var leftover = false
     var onStop: (() -> Void)?
@@ -157,9 +156,6 @@ final class ProcessCell: HoverCell {
         super.init(frame: frameRect)
         nameLabel.font = .systemFont(ofSize: 13)
         nameLabel.lineBreakMode = .byTruncatingMiddle
-        metadata.font = .systemFont(ofSize: 11)
-        metadata.textColor = .secondaryLabelColor
-        metadata.lineBreakMode = .byTruncatingMiddle
         memoryLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         memoryLabel.textColor = .secondaryLabelColor
         memoryLabel.alignment = .right
@@ -168,7 +164,7 @@ final class ProcessCell: HoverCell {
         stop.font = .systemFont(ofSize: 11)
         stop.target = self
         stop.action = #selector(stopClicked)
-        for child in [icon, nameLabel, metadata, memoryLabel, stop] { addSubview(child) }
+        for child in [icon, nameLabel, memoryLabel, stop] { addSubview(child) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(_ item: AttributedProcess, session: AgentSession?, stopping: Bool) {
@@ -179,16 +175,12 @@ final class ProcessCell: HoverCell {
         memoryLabel.stringValue = entry.memoryLabel
         icon.image = NSImage(systemSymbolName: item.role.symbol, accessibilityDescription: nil)
         icon.contentTintColor = leftover ? .systemOrange : .secondaryLabelColor
-        metadata.isHidden = !leftover
-        if let session, leftover {
-            metadata.stringValue = "\(session.uiProjectName) · \(session.kind.displayName)\(session.state.uiSuffix) · \(entry.ageLabel)"
-            metadata.toolTip = metadata.stringValue
-        }
         ports.forEach { $0.removeFromSuperview() }
         ports = entry.listeningPorts.prefix(3).map { PortButton(port: $0) }
         if entry.listeningPorts.count > 3 {
             let more = NSButton(title: "+\(entry.listeningPorts.count - 3)", target: self, action: #selector(detailsClicked))
             more.isBordered = false
+            more.bezelStyle = .inline
             more.font = .systemFont(ofSize: 12)
             more.toolTip = entry.listeningPorts.map { ":" + $0 }.joined(separator: ", ")
             ports.append(more)
@@ -204,7 +196,7 @@ final class ProcessCell: HoverCell {
     }
     override func layout() {
         super.layout()
-        let y: CGFloat = leftover ? 1 : 2
+        let y: CGFloat = 2
         icon.frame = NSRect(x: 42, y: y + 3, width: 14, height: 14)
         let portWidth = ports.reduce(CGFloat.zero) { $0 + ceil($1.intrinsicContentSize.width) + 4 }
         let available = bounds.width - 12 - 92 - 8 - 62
@@ -214,12 +206,17 @@ final class ProcessCell: HoverCell {
         var x = nameLabel.frame.maxX + 6
         for port in ports {
             let width = ceil(port.intrinsicContentSize.width)
-            port.frame = NSRect(x: x, y: y - 1, width: width, height: 22)
+            var frame = NSRect(x: x, y: y - 1, width: width, height: 20)
+            let nameBaseline = nameLabel.alignmentRect(forFrame: nameLabel.frame).minY + nameLabel.firstBaselineOffsetFromTop
+            // Inline NSButton reports its text baseline before the centered title inset.
+            let titleInset = port.cell?.titleRect(forBounds: NSRect(origin: .zero, size: frame.size)).minY ?? 0
+            let portBaseline = port.alignmentRect(forFrame: frame).minY + titleInset + port.firstBaselineOffsetFromTop
+            frame.origin.y += nameBaseline - portBaseline
+            port.frame = frame
             x += width + 4
         }
         memoryLabel.frame = NSRect(x: bounds.width - 12 - 92, y: y + 1, width: 92, height: 18)
         stop.frame = NSRect(x: bounds.width - 12 - 92, y: y - 1, width: 92, height: 23)
-        metadata.frame = NSRect(x: 62, y: 21, width: max(0, bounds.width - 74), height: 16)
     }
     override func hoverChanged() {
         stop.isHidden = !hovered
