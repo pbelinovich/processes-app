@@ -210,12 +210,36 @@ enum Attribution {
         }.map { AttributedProcess(entry: $0.entry, role: $0.role, depth: 0, tree: $0.tree) }
     }
 
+    /// Claude replaces '/' with '-'. Resolve existing directories to preserve hyphens in names;
+    /// unavailable/ambiguous paths can only be reconstructed on a best-effort basis.
+    static func claudeProjectPath(_ encoded: String, knownPaths: [String] = [],
+                                  directoryExists: (String) -> Bool) -> String {
+        if let known = knownPaths.sorted().first(where: { $0.replacingOccurrences(of: "/", with: "-") == encoded }) { return known }
+        guard encoded.hasPrefix("-") else { return "" }
+        let parts = encoded.dropFirst().split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        var checks = 0
+        func resolve(_ start: Int, _ parent: String) -> String? {
+            guard start < parts.count else { return parent }
+            for end in stride(from: parts.count, through: start + 1, by: -1) {
+                let component = parts[start..<end].joined(separator: "-")
+                guard !component.isEmpty else { continue }
+                let candidate = parent + "/" + component
+                checks += 1
+                guard checks <= 256 else { return nil }
+                if directoryExists(candidate), let path = resolve(end, candidate) { return path }
+            }
+            return nil
+        }
+        return resolve(0, "") ?? encoded.replacingOccurrences(of: "-", with: "/")
+    }
+
     /// Only path and mtime are inspected. Session file contents are never opened.
     static func sessionFiles(for processes: [ProcessEntry]) -> [AgentMarker: SessionFile] {
         let wanted = Set(processes.compactMap(\.agentMarker))
         guard !wanted.isEmpty else { return [:] }
         let manager = FileManager.default
         let home = manager.homeDirectoryForCurrentUser
+        let knownPaths = Array(Set(processes.filter { $0.uid == getuid() }.map(\.workingDirectory).filter { !$0.isEmpty }))
         var result: [AgentMarker: SessionFile] = [:]
         for (kind, relative) in [(AgentKind.codex, ".codex/sessions"), (.claude, ".claude/projects")] {
             let markers = wanted.filter { $0.kind == kind }
@@ -230,8 +254,10 @@ enum Attribution {
                     kind == .codex ? filename.hasSuffix("-" + $0.sessionID) : filename == $0.sessionID
                 }), let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
                    values.isRegularFile == true, let modified = values.contentModificationDate else { continue }
-                // Claude's project folder encodes '/' as '-'; this is necessarily lossy for names containing '-'.
-                let project = kind == .claude ? url.deletingLastPathComponent().lastPathComponent.replacingOccurrences(of: "-", with: "/") : ""
+                let project = kind == .claude ? claudeProjectPath(url.deletingLastPathComponent().lastPathComponent, knownPaths: knownPaths) { path in
+                    var directory: ObjCBool = false
+                    return manager.fileExists(atPath: path, isDirectory: &directory) && directory.boolValue
+                } : ""
                 if result[marker].map({ $0.modifiedAt < modified }) ?? true {
                     result[marker] = SessionFile(modifiedAt: modified, projectPath: project)
                 }
@@ -272,7 +298,11 @@ extension ProcessService {
             guard alive(entry) else { stopped.append(entry.pid); continue }
             do { try terminate(entry); pending.append(entry) }
             catch Failure.gone { stopped.append(entry.pid) }
-            catch { failed[entry.pid] = error.localizedDescription }
+            catch {
+                // ESRCH can race with the identity check when a process exits on its own.
+                if !alive(entry) { stopped.append(entry.pid) }
+                else { failed[entry.pid] = error.localizedDescription }
+            }
         }
         let duration = grace.isFinite ? max(0, grace) : 3
         let deadline = ContinuousClock.now.advanced(by: .seconds(duration))
@@ -290,7 +320,11 @@ extension ProcessService {
             guard alive(entry) else { stopped.append(entry.pid); continue }
             do { try terminate(entry, force: true); killed.append(entry.pid) }
             catch Failure.gone { stopped.append(entry.pid) }
-            catch { failed[entry.pid] = error.localizedDescription }
+            catch {
+                // ESRCH can race with the identity check when a process exits on its own.
+                if !alive(entry) { stopped.append(entry.pid) }
+                else { failed[entry.pid] = error.localizedDescription }
+            }
         }
         return StopResult(stopped: stopped.sorted(), killed: killed.sorted(), failed: failed)
     }

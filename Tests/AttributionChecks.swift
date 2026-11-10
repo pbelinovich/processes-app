@@ -114,6 +114,11 @@ enum AttributionChecks {
                                                 entry(931, "worker", parent: 930)], now: now)
         precondition(plainTree.leftoverCount == 1 && plainTree.leftoverSessions[0].processes[0].entry.pid == 930)
 
+        let directories: Set<String> = ["/Users", "/Users/synthetic", "/Users/synthetic/my-project"]
+        precondition(Attribution.claudeProjectPath("-Users-synthetic-my-project", directoryExists: directories.contains) == "/Users/synthetic/my-project")
+        precondition(Attribution.claudeProjectPath("-gone-project-name", knownPaths: ["/gone/project-name"], directoryExists: { _ in false }) == "/gone/project-name")
+        precondition(Attribution.claudeProjectPath("-gone-project", directoryExists: { _ in false }) == "/gone/project")
+
         let fallback = Attribution.build(from: [entry(950, "node", marker: claude, cwd: "")], now: now,
                                          sessionFiles: [claude: .init(modifiedAt: now, projectPath: "/fallback")])
         precondition(fallback.leftoverSessions[0].projectPath == "/fallback")
