@@ -9,13 +9,22 @@ enum ScreenshotUIChecks {
         let output = ProcessInfo.processInfo.environment["PROCESSES_SCREENSHOT_DIR"] ?? "/tmp/processes-ui-02"
         try FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
 
-        func render(_ name: String, snapshot: AttributedSnapshot, dark: Bool = false, all: Bool = false, hover: Bool = false) throws {
+        func cache(_ view: NSView, name: String) throws {
+            let bounds = view.bounds
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: bounds) else { fatalError("No bitmap") }
+            view.appearance?.performAsCurrentDrawingAppearance { view.cacheDisplay(in: bounds, to: bitmap) }
+            guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
+            try png.write(to: URL(fileURLWithPath: output).appendingPathComponent(name + ".png"))
+        }
+
+        func render(_ name: String, snapshot: AttributedSnapshot, dark: Bool = false, all: Bool = false, hover: Bool = false, query: String = "") throws {
             let controller = ProcessListController()
             let window = NSWindow(contentViewController: controller)
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             controller.view.appearance = window.appearance
             controller.receive(snapshot)
             controller.selectTab(all ? 1 : 0)
+            controller.setQuery(query)
             controller.view.layoutSubtreeIfNeeded()
             controller.table.layoutSubtreeIfNeeded()
             controller.view.displayIfNeeded()
@@ -23,19 +32,14 @@ enum ScreenshotUIChecks {
                 let cell = controller.table.view(atColumn: 0, row: 1, makeIfNecessary: true) as? ProcessCell
                 cell?.setHoveredForCheck(true)
             }
-            let bounds = controller.view.bounds
-            guard let bitmap = controller.view.bitmapImageRepForCachingDisplay(in: bounds) else { fatalError("No bitmap") }
             // AppKit can render an attached view without ordering its window onscreen.
-            controller.view.appearance?.performAsCurrentDrawingAppearance {
-                controller.view.cacheDisplay(in: bounds, to: bitmap)
-            }
-            guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
-            try png.write(to: URL(fileURLWithPath: output).appendingPathComponent(name + ".png"))
+            try cache(controller.view, name: name)
             precondition(!window.isVisible, "Screenshot checks must never show a window")
             if name.hasPrefix("agents-") {
                 precondition(controller.rows.count == 13, "Fixture must include three leftovers, six compact live sessions, two meaningful tasks and collapsed other servers")
                 let totalHeight = controller.rows.reduce(CGFloat.zero) { $0 + $1.height }
                 precondition(totalHeight <= controller.table.enclosingScrollView!.contentSize.height, "All agent rows must fit without scrolling")
+                print("PASS: six-session fixture uses \(totalHeight) / \(controller.table.enclosingScrollView!.contentSize.height) pt")
             }
             print("PASS: offscreen \(name) → \(output)/\(name).png")
             withExtendedLifetime(window) {}
@@ -48,6 +52,23 @@ enum ScreenshotUIChecks {
         try render("hover", snapshot: UIFixtures.agents, hover: true)
         try render("all-processes", snapshot: UIFixtures.agents, all: true)
         try render("long-names", snapshot: UIFixtures.longNames)
+        try render("mcp-search", snapshot: UIFixtures.agents, query: "figma-mcp")
+
+        let detailSession = UIFixtures.agents.liveSessions.first { $0.id == "live-vite" }!
+        let detailController = SessionDetailsController(session: detailSession)
+        let detailWindow = NSWindow(contentViewController: detailController)
+        detailWindow.appearance = NSAppearance(named: .aqua)
+        detailController.view.appearance = detailWindow.appearance
+        detailController.view.layoutSubtreeIfNeeded()
+        detailController.view.displayIfNeeded()
+        let detailText = detailController.view.subviews.compactMap { ($0 as? NSScrollView)?.documentView as? NSTextView }.first!
+        precondition(detailText.frame.height > detailText.enclosingScrollView!.contentSize.height, "Long session details must remain scrollable, including the last MCP")
+        for item in detailSession.uiMCPProcesses {
+            precondition(detailText.string.contains(item.entry.displayName) && detailText.string.contains("PID \(item.id)"), "Collapsed MCP must remain inspectable in session details")
+        }
+        try cache(detailController.view, name: "session-details")
+        precondition(!detailWindow.isVisible)
+        withExtendedLifetime(detailWindow) {}
 
         let real = await Task.detached(priority: .utility) { Attribution.snapshot() }.value
         try render("real-agents", snapshot: real)
