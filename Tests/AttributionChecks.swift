@@ -19,7 +19,7 @@ enum AttributionChecks {
     static func main() {
         let liveClaude = Attribution.build(from: [
             entry(100, "claude"),
-            entry(101, "npm exec", parent: 100, command: "npm exec @playwright/mcp", marker: claude),
+            entry(101, "npm exec", parent: 100, command: "npm exec @playwright/mcp --browser chrome", marker: claude),
             entry(102, "node", parent: 101, command: "node /modules/@playwright/mcp/cli.js", marker: claude)
         ], now: now)
         precondition(liveClaude.liveSessions.count == 1 && liveClaude.leftoverSessions.isEmpty)
@@ -50,6 +50,9 @@ enum AttributionChecks {
         let recent = Attribution.build(from: daemonTree, now: now,
                                        sessionFiles: [codex: .init(modifiedAt: now.addingTimeInterval(-30))])
         precondition(recent.liveSessions.count == 1 && recent.leftoverSessions.isEmpty)
+        let boundary = Attribution.build(from: daemonTree, now: now,
+                                         sessionFiles: [codex: .init(modifiedAt: now.addingTimeInterval(-600.5))])
+        precondition(boundary.liveSessions.isEmpty && boundary.leftoverSessions[0].state == .idle(seconds: 600))
         let missingFile = Attribution.build(from: daemonTree, now: now)
         precondition(missingFile.liveSessions.isEmpty && missingFile.leftoverSessions.count == 1)
         let noAgent = Attribution.build(from: Array(daemonTree.dropFirst()), now: now,
@@ -67,6 +70,8 @@ enum AttributionChecks {
         precondition(browser.leftoverSessions[0].processes[0].role == .browser)
         precondition(browser.leftoverSessions[0].processes[0].tree.count == 6)
         precondition(Attribution.role(entry(600, "headless_shell")) == .browser)
+        precondition(Attribution.role(entry(603, "npm", command: "npm exec @playwright/mcp --browser firefox")) == .mcp)
+        precondition(!Attribution.isCodexDaemon(entry(604, "codex", command: "codex exec inspect /app-server-daemon/log")))
         precondition(Attribution.role(entry(601, "firefox", command: "/cache/ms-playwright/firefox/firefox")) == .browser)
         precondition(Attribution.role(entry(602, "MiniBrowser", command: "/cache/ms-playwright/webkit/pw_run.sh")) == .browser)
 
@@ -96,6 +101,18 @@ enum AttributionChecks {
                                agentMarker: codex)
         let foreignSnapshot = Attribution.build(from: [foreign], now: now)
         precondition(foreignSnapshot.leftoverSessions.isEmpty && foreignSnapshot.otherServers.count == 1)
+
+        // A nested agent can inherit both kinds of marker. Its nearest agent wins.
+        let inherited = [codex, claude]
+        let nested = [entry(920, "claude"), entry(921, "node", parent: 920, marker: codex)]
+        let resolvedClaude = ProcessService.resolvingMarkers(nested, candidates: [921: inherited])
+        precondition(resolvedClaude[1].agentMarker == claude)
+        let nestedCodex = [entry(922, "codex"), entry(923, "node", parent: 922, marker: claude)]
+        let resolvedCodex = ProcessService.resolvingMarkers(nestedCodex, candidates: [923: inherited])
+        precondition(resolvedCodex[1].agentMarker == codex)
+        let plainTree = Attribution.build(from: [entry(930, "python", marker: claude),
+                                                entry(931, "worker", parent: 930)], now: now)
+        precondition(plainTree.leftoverCount == 1 && plainTree.leftoverSessions[0].processes[0].entry.pid == 930)
 
         let fallback = Attribution.build(from: [entry(950, "node", marker: claude, cwd: "")], now: now,
                                          sessionFiles: [claude: .init(modifiedAt: now, projectPath: "/fallback")])

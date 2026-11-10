@@ -18,7 +18,8 @@ enum ProcessService {
         guard count > 0 else { return [] }
         var owners: [uid_t: String] = [:]
         let argumentCapacity = argumentBufferCapacity()
-        return pids.prefix(Int(count)).compactMap { pid in
+        var markerCandidates: [pid_t: [AgentMarker]] = [:]
+        let entries = pids.prefix(Int(count)).compactMap { pid -> ProcessEntry? in
             guard pid > 0, var info = details(pid) else { return nil }
             let name = withUnsafePointer(to: &info.pbi_name) {
                 $0.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
@@ -32,7 +33,8 @@ enum ProcessService {
             var task = proc_taskinfo()
             let taskSize = Int32(MemoryLayout<proc_taskinfo>.size)
             let hasMemory = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, taskSize) == taskSize
-            let arguments = info.pbi_uid == getuid() ? processArguments(pid, capacity: argumentCapacity) : (command: "", marker: nil)
+            let arguments = info.pbi_uid == getuid() ? processArguments(pid, capacity: argumentCapacity) : Arguments(command: "", markers: [])
+            markerCandidates[pid] = arguments.markers
             return ProcessEntry(pid: pid, name: name.isEmpty ? fallback : name,
                                 owner: owners[info.pbi_uid]!, uid: info.pbi_uid,
                                 startedSeconds: info.pbi_start_tvsec,
@@ -44,6 +46,30 @@ enum ProcessService {
         }.sorted {
             let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
             return comparison == .orderedSame ? $0.pid < $1.pid : comparison == .orderedAscending
+        }
+        return resolvingMarkers(entries, candidates: markerCandidates)
+    }
+
+    /// Nested agents can inherit another agent's markers. Prefer the nearest live agent's kind;
+    /// without ancestry, a Codex thread identifier takes priority over a general session identifier.
+    static func resolvingMarkers(_ entries: [ProcessEntry], candidates: [pid_t: [AgentMarker]]) -> [ProcessEntry] {
+        let byPID = Dictionary(entries.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
+        return entries.map { entry in
+            let markers = candidates[entry.pid] ?? []
+            guard Set(markers.map(\.kind)).count > 1 else { return entry }
+            var current: ProcessEntry? = entry
+            var seen: Set<pid_t> = []
+            while let ancestor = current, ancestor.uid == entry.uid, seen.insert(ancestor.pid).inserted {
+                guard ancestor.startedSeconds <= entry.startedSeconds else { break }
+                if let kind = Attribution.agentKind(ancestor), !Attribution.isAgentHelper(ancestor),
+                   let marker = markers.first(where: { $0.kind == kind }) {
+                    var resolved = entry
+                    resolved.agentMarker = marker
+                    return resolved
+                }
+                current = byPID[ancestor.parentPID]
+            }
+            return entry
         }
     }
 
@@ -70,26 +96,32 @@ enum ProcessService {
         return processArguments(pid, capacity: argumentBufferCapacity()).command
     }
 
-    static func processArguments(_ pid: pid_t, capacity: Int) -> (command: String, marker: AgentMarker?) {
+    struct Arguments {
+        let command: String
+        let markers: [AgentMarker]
+        var marker: AgentMarker? { markers.first }
+    }
+
+    static func processArguments(_ pid: pid_t, capacity: Int) -> Arguments {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = capacity
         var bytes = [UInt8](repeating: 0, count: capacity)
         let result = bytes.withUnsafeMutableBytes { sysctl(&mib, 3, $0.baseAddress, &size, nil, 0) }
-        guard result == 0 else { return ("", nil) }
+        guard result == 0 else { return Arguments(command: "", markers: []) }
         return parseArguments(bytes.prefix(size))
     }
 
     /// Never decode an environment entry before checking its key as bytes.
-    static func parseArguments(_ bytes: ArraySlice<UInt8>) -> (command: String, marker: AgentMarker?) {
-        guard bytes.count > MemoryLayout<Int32>.size else { return ("", nil) }
+    static func parseArguments(_ bytes: ArraySlice<UInt8>) -> Arguments {
+        guard bytes.count > MemoryLayout<Int32>.size else { return Arguments(command: "", markers: []) }
         let argc = bytes.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
-        guard argc > 0, argc < bytes.count else { return ("", nil) }
+        guard argc > 0, argc < bytes.count else { return Arguments(command: "", markers: []) }
         var offset = bytes.startIndex + MemoryLayout<Int32>.size
         while offset < bytes.endIndex && bytes[offset] != 0 { offset += 1 }
         while offset < bytes.endIndex && bytes[offset] == 0 { offset += 1 }
         var arguments: [String] = []
         for _ in 0..<argc {
-            guard offset < bytes.endIndex else { return (arguments.joined(separator: " "), nil) }
+            guard offset < bytes.endIndex else { return Arguments(command: arguments.joined(separator: " "), markers: []) }
             let start = offset
             while offset < bytes.endIndex && bytes[offset] != 0 { offset += 1 }
             let argument = String(decoding: bytes[start..<offset], as: UTF8.self)
@@ -97,8 +129,8 @@ enum ProcessService {
             offset += 1
         }
         let allowed: [(key: [UInt8], kind: AgentKind)] = [
-            (Array("CLAUDE_CODE_SESSION_ID=".utf8), .claude),
             (Array("CODEX_THREAD_ID=".utf8), .codex),
+            (Array("CLAUDE_CODE_SESSION_ID=".utf8), .claude),
             (Array("CODEX_SESSION_ID=".utf8), .codex)
         ]
         var markers: [Int: AgentMarker] = [:]
@@ -106,13 +138,14 @@ enum ProcessService {
             let start = offset
             while offset < bytes.endIndex && bytes[offset] != 0 { offset += 1 }
             let entry = bytes[start..<offset]
+            if entry.isEmpty { break } // environment terminator; do not scan Apple's trailing strings
             for (priority, item) in allowed.enumerated() where entry.starts(with: item.key) {
                 let value = entry.dropFirst(item.key.count)
                 if !value.isEmpty { markers[priority] = AgentMarker(kind: item.kind, sessionID: String(decoding: value, as: UTF8.self)) }
             }
             offset += 1
         }
-        return (arguments.joined(separator: " "), markers.keys.min().flatMap { markers[$0] })
+        return Arguments(command: arguments.joined(separator: " "), markers: markers.keys.sorted().compactMap { markers[$0] })
     }
 
     static func listeningPorts() -> [pid_t: [String]] {

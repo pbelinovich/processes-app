@@ -91,8 +91,9 @@ enum Attribution {
             if let agent = identity.agent {
                 if isCodexDaemon(agent) {
                     // A daemon's existence says nothing about a particular thread's activity.
-                    let age = file.map { max(0, Int(now.timeIntervalSince($0.modifiedAt))) }
-                    state = age.map { $0 <= 600 ? .active : .idle(seconds: $0) } ?? .idle(seconds: 600)
+                    let age = file.map { max(0, now.timeIntervalSince($0.modifiedAt)) }
+                    // No file means unknown idle duration; never manufacture a last-active time.
+                    state = age.map { $0 <= 600 ? .active : .idle(seconds: Int($0)) } ?? .idle(seconds: 0)
                 } else { state = .active }
             } else { state = .ended }
             let project = [identity.agent?.workingDirectory ?? "",
@@ -111,10 +112,14 @@ enum Attribution {
                                   otherServers: other, all: processes)
     }
 
+    static func executable(_ command: String) -> String {
+        if command.first == "\"" { return String(command.dropFirst().prefix { $0 != "\"" }) }
+        return command.split(separator: " ").first.map(String.init) ?? ""
+    }
+
     static func agentKind(_ entry: ProcessEntry) -> AgentKind? {
         let name = entry.name.lowercased()
-        let executable = entry.command.split(separator: " ").first.map(String.init) ?? ""
-        let basename = (executable.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) as NSString).lastPathComponent.lowercased()
+        let basename = (executable(entry.command) as NSString).lastPathComponent.lowercased()
         let names = [name, basename]
         if names.contains("claude") || names.contains("claude-code") { return .claude }
         if names.contains("codex") || names.contains("codex-code-mode-host") { return .codex }
@@ -124,17 +129,19 @@ enum Attribution {
     }
 
     static func isAgentHelper(_ entry: ProcessEntry) -> Bool {
-        entry.name.lowercased() == "codex-code-mode-host" || entry.command.split(separator: " ").first?.hasSuffix("/codex-code-mode-host") == true
+        entry.name.lowercased() == "codex-code-mode-host" || (executable(entry.command) as NSString).lastPathComponent == "codex-code-mode-host"
     }
 
     static func isCodexDaemon(_ entry: ProcessEntry) -> Bool {
-        agentKind(entry) == .codex && entry.command.contains("/app-server-daemon/")
+        agentKind(entry) == .codex && executable(entry.command).contains("/app-server-daemon/")
     }
 
     static func role(_ entry: ProcessEntry) -> ProcessRole {
         let text = (entry.name + " " + entry.command).lowercased()
-        if text.contains("chrome") || text.contains("chromium") || text.contains("headless_shell") ||
-            ((text.contains("webkit") || text.contains("firefox")) &&
+        // MCP's --browser chrome argument is not a browser executable.
+        let nameAndExecutable = (entry.name + " " + executable(entry.command)).lowercased()
+        if nameAndExecutable.contains("chrome") || nameAndExecutable.contains("chromium") || nameAndExecutable.contains("headless_shell") ||
+            ((nameAndExecutable.contains("webkit") || nameAndExecutable.contains("firefox")) &&
              (text.contains("playwright") || text.contains("ms-playwright"))) { return .browser }
         if !entry.listeningPorts.isEmpty { return .server }
         if text.contains("@playwright/mcp") || text.contains("mcp-server") || text.contains("/mcp/") ||
@@ -171,6 +178,9 @@ enum Attribution {
             guard visited.insert(entry.pid).inserted else { return [] }
             let ownRole = role(entry)
             var groups = (children[entry.pid] ?? []).sorted { $0.pid < $1.pid }.flatMap { walk($0) }
+            if ownRole == .other && groups.allSatisfy({ $0.role == .other || $0.role == .helper }) {
+                return [Group(entry: entry, role: ownRole, tree: [entry] + groups.flatMap(\.tree))]
+            }
             if ownRole == .helper || ownRole == .other {
                 if !groups.isEmpty {
                     // Prefer a listening application over its npm/sh/node wrapper.
