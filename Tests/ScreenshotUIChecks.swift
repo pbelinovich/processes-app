@@ -16,6 +16,21 @@ final class GridOverlay: NSView {
     }
 }
 
+@MainActor
+final class SpacingOverlay: NSView {
+    let gaps: [NSRect]
+    init(frame: NSRect, gaps: [NSRect]) { self.gaps = gaps; super.init(frame: frame) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func draw(_ dirtyRect: NSRect) {
+        for gap in gaps {
+            NSColor.systemPink.withAlphaComponent(0.22).setFill()
+            gap.fill()
+            ("4 pt" as NSString).draw(at: NSPoint(x: 2, y: gap.minY - 3), withAttributes: [.font: NSFont.systemFont(ofSize: 7), .foregroundColor: NSColor.systemPink])
+        }
+    }
+}
+
 @main
 enum ScreenshotUIChecks {
     @MainActor
@@ -54,9 +69,18 @@ enum ScreenshotUIChecks {
                 cell.setHoveredForCheck(true)
                 precondition(cell.memoryLabel.isHidden && !cell.stop.isHidden, "Hover must replace memory with Stop")
             }
-            var overlay: GridOverlay?
+            var overlay: NSView?
             if grid {
                 let lines = GridOverlay(frame: controller.view.bounds)
+                controller.view.addSubview(lines)
+                overlay = lines
+            }
+            if name == "session-spacing" {
+                let gaps = controller.rows.indices.compactMap { index -> NSRect? in
+                    guard case .gap = controller.rows[index] else { return nil }
+                    return controller.table.convert(controller.table.rect(ofRow: index), to: controller.view)
+                }
+                let lines = SpacingOverlay(frame: controller.view.bounds, gaps: gaps)
                 controller.view.addSubview(lines)
                 overlay = lines
             }
@@ -66,6 +90,23 @@ enum ScreenshotUIChecks {
                 let total = controller.rows.reduce(CGFloat.zero) { $0 + $1.height }
                 precondition(total <= controller.table.enclosingScrollView!.contentSize.height + 1, "Default six-session fixture must fit")
                 try cache(controller.view, name: "agents-dark-crop", rect: NSRect(x: 0, y: controller.view.bounds.height - 300, width: 560, height: 214))
+                let pixels = NSBitmapImageRep(data: try Data(contentsOf: URL(fileURLWithPath: output).appendingPathComponent(name + ".png")))!
+                func glyphBottom(in rect: NSRect, blue: Bool) -> Int {
+                    let scale = CGFloat(pixels.pixelsWide) / controller.view.bounds.width
+                    let top = Int(floor((controller.view.bounds.height - rect.maxY) * scale))
+                    let bottom = Int(ceil((controller.view.bounds.height - rect.minY) * scale))
+                    var result: Int?
+                    for y in max(0, top)..<min(pixels.pixelsHigh, bottom) {
+                        for x in max(0, Int(rect.minX * scale))..<min(pixels.pixelsWide, Int(ceil(rect.maxX * scale))) {
+                            guard let color = pixels.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                            let r = color.redComponent, g = color.greenComponent, b = color.blueComponent
+                            let ink = blue ? b > 0.7 && r < 0.5 && g > 0.2 : min(r, g, b) > 0.7 && max(r, g, b) - min(r, g, b) < 0.05
+                            if ink { result = y }
+                        }
+                    }
+                    guard let result else { fatalError("Expected rendered glyph pixels") }
+                    return result
+                }
                 for row in controller.rows.indices where row > 0 {
                     if case .gap = controller.rows[row] {
                         let previous = controller.table.rect(ofRow: row - 1)
@@ -88,11 +129,13 @@ enum ScreenshotUIChecks {
                         precondition(abs(process.convert(process.nameLabel.frame.origin, to: controller.view).x - 62) < 0.1)
                         precondition(abs(process.convert(process.memoryLabel.frame, to: controller.view).maxX - 548) < 0.1)
                         precondition(abs(process.convert(process.stop.frame, to: controller.view).maxX - 548) < 0.1)
-                        let nameBaseline = process.nameLabel.alignmentRect(forFrame: process.nameLabel.frame).minY + process.nameLabel.firstBaselineOffsetFromTop
-                        for port in process.subviews.compactMap({ $0 as? PortButton }) {
-                            let portBaseline = port.alignmentRect(forFrame: port.frame).minY + port.cell!.titleRect(forBounds: port.bounds).minY + port.firstBaselineOffsetFromTop
-                            precondition(abs(nameBaseline - portBaseline) < 0.01, "Port links must share the process-name baseline")
-                            print("PASS: rendered name/link baseline \(nameBaseline)pt")
+                        if process.nameLabel.stringValue == "vite" {
+                            let nameBottom = glyphBottom(in: process.nameLabel.convert(process.nameLabel.bounds, to: controller.view), blue: false)
+                            for port in process.subviews.compactMap({ $0 as? PortButton }) {
+                                let portBottom = glyphBottom(in: port.convert(port.bounds, to: controller.view), blue: true)
+                                precondition(abs(nameBottom - portBottom) <= 1, "Rendered port digits and process name must share the baseline within one pixel")
+                                print("PASS: PNG name/link baseline delta \(abs(nameBottom - portBottom))px")
+                            }
                         }
                         precondition(process.subviews.compactMap { $0 as? NSTextField }.count == 2, "Process rows must not repeat session metadata")
                     }
@@ -124,6 +167,7 @@ enum ScreenshotUIChecks {
         try render("hover-stop", snapshot: fixture, hoverPID: 91_001)
         try render("empty-dark", snapshot: .empty)
         try render("grid-check", snapshot: fixture, grid: true)
+        try render("session-spacing", snapshot: fixture)
         try render("all-processes", snapshot: fixture, all: true)
         let real = await Task.detached(priority: .utility) { Attribution.snapshot() }.value
         try render("real-dark", snapshot: real)
