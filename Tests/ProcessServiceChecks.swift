@@ -99,7 +99,10 @@ enum ProcessServiceChecks {
         try unrestricted.run()
         let unrestrictedEntry = ProcessService.snapshot().first { $0.pid == unrestricted.processIdentifier }!
         defer { try? ProcessService.terminate(unrestrictedEntry, force: true); unrestricted.waitUntilExit() }
-        precondition(unrestrictedEntry.agentMarker == marker)
+        // Both kinds are present; resolution prefers the nearest live agent among the test runner's ancestors
+        // (Codex when run by a Codex worker, Claude when run inside Claude Code), else the Codex thread ID.
+        let expectedClaude = AgentMarker(kind: .claude, sessionID: "synthetic-host-child", hostPID: getpid())
+        precondition(unrestrictedEntry.agentMarker == marker || unrestrictedEntry.agentMarker == expectedClaude)
         let inherited = ProcessService.processArguments(unrestrictedEntry.pid, capacity: ProcessService.argumentBufferCapacity())
         precondition(inherited.markers.first { $0.kind == .claude }?.hostPID == getpid())
         let staleChild = ProcessEntry(pid: unrestrictedEntry.pid, name: "stale", owner: "synthetic", uid: getuid(),
