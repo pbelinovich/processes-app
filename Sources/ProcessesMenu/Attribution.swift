@@ -126,8 +126,12 @@ enum Attribution {
     }
 
     static func executable(_ command: String) -> String {
-        if command.first == "\"" { return String(command.dropFirst().prefix { $0 != "\"" }) }
-        return command.split(separator: " ").first.map(String.init) ?? ""
+        let first: String
+        if command.first == "\"" { first = String(command.dropFirst().prefix { $0 != "\"" }) }
+        else { first = command.split(separator: " ").first.map(String.init) ?? "" }
+        // setproctitle can replace argv[0] with "npm exec … --browser chrome".
+        // Its arguments must not make npm itself look like a Chrome executable.
+        return ProcessDisplayName.launchers.first(where: { first.hasPrefix($0 + " ") }) ?? first
     }
 
     static func agentKind(_ entry: ProcessEntry) -> AgentKind? {
@@ -157,8 +161,12 @@ enum Attribution {
             ((nameAndExecutable.contains("webkit") || nameAndExecutable.contains("firefox")) &&
              (text.contains("playwright") || text.contains("ms-playwright"))) { return .browser }
         if !entry.listeningPorts.isEmpty { return .server }
-        if text.contains("@playwright/mcp") || text.contains("mcp-server") || text.contains("/mcp/") ||
-            text.contains(" mcp ") || text.hasSuffix(" mcp") { return .mcp }
+        let shellNames = ["sh", "bash", "zsh", "fish"]
+        let isShell = shellNames.contains((executable(entry.command) as NSString).lastPathComponent.lowercased()) || shellNames.contains(entry.name.lowercased())
+        // Shell payloads often contain inspection/test source mentioning MCP. They are wrappers,
+        // not MCP servers; an actual MCP child still supplies the group's representative.
+        if !isShell && (text.contains("@playwright/mcp") || text.contains("mcp-server") || text.contains("/mcp/") ||
+            text.contains(" mcp ") || text.hasSuffix(" mcp")) { return .mcp }
         let name = entry.name.lowercased()
         if ["sh", "bash", "zsh", "fish", "npm", "npx", "env"].contains(name) ||
             text.hasPrefix("npm run ") || text.hasPrefix("npm exec ") { return .helper }
@@ -349,6 +357,7 @@ extension ProcessEntry {
 }
 
 private enum ProcessDisplayName {
+    static let launchers = ["npm", "npx", "pnpm", "yarn", "node", "nodejs", "bun", "bunx", "deno", "python", "python3", "ruby", "java"]
     /// Tokenize the quoted argv representation produced by ProcessService without executing a shell.
     static func words(_ command: String) -> [String] {
         var result: [String] = []
@@ -372,7 +381,12 @@ private enum ProcessDisplayName {
     }
 
     static func name(command: String, fallback: String) -> String {
-        let arguments = words(command)
+        var arguments = words(command)
+        // npm/setproctitle may flatten the whole command into argv[0]. Only unwrap known
+        // launchers; a real executable path containing spaces remains one token.
+        if let title = arguments.first, launchers.contains(where: { title.hasPrefix($0 + " ") }) {
+            arguments = words(title) + arguments.dropFirst()
+        }
         guard let executable = arguments.first else { return shortened(fallback) }
         let binary = (executable as NSString).lastPathComponent
         let lower = binary.lowercased()

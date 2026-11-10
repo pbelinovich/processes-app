@@ -74,6 +74,8 @@ enum AttributionChecks {
         precondition(browser.leftoverSessions[0].processes[0].tree.count == 6)
         precondition(Attribution.role(entry(600, "headless_shell")) == .browser)
         precondition(Attribution.role(entry(603, "npm", command: "npm exec @playwright/mcp --browser firefox")) == .mcp)
+        precondition(Attribution.role(entry(605, "node", command: "\"npm exec @playwright/mcp --browser chrome\"")) == .mcp)
+        precondition(Attribution.role(entry(606, "zsh", command: "zsh -c \"echo inspecting @playwright/mcp\"")) == .helper)
         precondition(!Attribution.isCodexDaemon(entry(604, "codex", command: "codex exec inspect /app-server-daemon/log")))
         precondition(Attribution.role(entry(601, "firefox", command: "/cache/ms-playwright/firefox/firefox")) == .browser)
         precondition(Attribution.role(entry(602, "MiniBrowser", command: "/cache/ms-playwright/webkit/pw_run.sh")) == .browser)
@@ -169,6 +171,9 @@ enum AttributionChecks {
             ("vite", "/project/node_modules/.bin/vite preview --port 8000", "vite preview"),
             ("pytest", "/project/.venv/bin/pytest --verbose /project/tests", "pytest"),
             ("sleep", "/bin/sleep 60", "sleep"),
+            ("node", "\"npm exec @playwright/mcp --headless\"", "playwright-mcp"),
+            ("node", "\"npm exec @playwright/mcp@0.0.83\" \"\" \"\"", "playwright-mcp"),
+            ("node", "\"node /cache/node_modules/.bin/vite --host 127.0.0.1\"", "vite"),
             ("fallback", "", "fallback")
         ]
         for (index, item) in cases.enumerated() {
