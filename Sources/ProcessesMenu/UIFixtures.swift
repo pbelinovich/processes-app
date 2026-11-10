@@ -25,7 +25,6 @@ enum UIFixtures {
     static var agents: AttributedSnapshot {
         let vite = item(entry(91_001, "vite", minutes: 7, memory: 64, ports: ["8000"], cwd: "/fixture/projects/sessions-online-third/frontend"), role: .server,
                         children: [entry(91_002, "node worker", minutes: 7, memory: 12, parent: 91_001)])
-        let chrome = item(entry(91_003, "Chrome headless", minutes: 120, memory: 128), role: .browser)
         let codexMCP = item(entry(91_004, "playwright-mcp", memory: 92), role: .mcp)
         let claudeMCP = item(entry(91_005, "playwright-mcp (headless)", minutes: 205, memory: 8), role: .mcp)
         let leftoverMCP = item(entry(91_015, "filesystem-mcp", minutes: 80, memory: 13), role: .mcp)
@@ -36,7 +35,7 @@ enum UIFixtures {
         let liveBrowser = item(entry(91_014, "Chrome headless", memory: 32), role: .browser)
         let leftovers = [
             session("ended-codex", .codex, "sessions-online-third/frontend", minutes: 7, state: .ended, items: [vite]),
-            session("ended-claude", .claude, "", minutes: 120, state: .ended, items: [chrome, leftoverMCP])
+            session("ended-claude", .claude, "", minutes: 120, state: .ended, items: [leftoverMCP])
         ]
         let live = [
             session("live-codex", .codex, "sessions-online-third", minutes: 12, items: [codexMCP]),

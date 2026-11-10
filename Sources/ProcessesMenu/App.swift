@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.contentViewController = controller
         popover.delegate = self
+        controller.onContentSize = { [weak self] size in self?.popover.contentSize = size }
         controller.onSnapshot = { [weak self] snapshot in
             guard let button = self?.item.button else { return }
             let count = snapshot.leftoverCount
