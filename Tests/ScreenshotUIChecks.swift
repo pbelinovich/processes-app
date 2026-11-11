@@ -61,7 +61,7 @@ enum ScreenshotUIChecks {
             if fullCommand {
                 let index = controller.rows.firstIndex { if case .details = $0 { return true }; return false }!
                 let cell = controller.tableView(controller.table, viewFor: nil, row: index)!
-                cell.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Показать всё" }!.performClick(nil)
+                cell.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Show all" }!.performClick(nil)
             }
             window.setContentSize(controller.preferredContentSize)
             controller.view.layoutSubtreeIfNeeded()
@@ -161,13 +161,13 @@ enum ScreenshotUIChecks {
                          "System summary must stay in the footer below sleep controls")
             let summaryLabel = controller.systemSummary.subviews.compactMap { $0 as? NSTextField }.first!
             let statusLabel = controller.view.subviews.compactMap { $0 as? NSTextField }.first {
-                $0.stringValue.hasPrefix("Сессий:") || $0.stringValue.hasPrefix("Процессов:")
+                $0.stringValue.hasPrefix("Sessions:") || $0.stringValue.hasPrefix("Processes:")
             }!
             precondition(statusLabel.frame.minY >= controller.systemSummary.frame.maxY + 2,
                          "Process status must be above the CPU summary in the footer")
             precondition(summaryLabel.intrinsicContentSize.width <= controller.systemSummary.bounds.width,
                          "System summary must fit alongside the Quit button")
-            precondition(checkbox.title == "Не усыплять Mac при закрытой крышке")
+            precondition(checkbox.title == "Keep Mac awake with the lid closed")
             precondition(controller.view.bounds.contains(checkbox.frame), "Sleep checkbox must fit the popover")
             precondition(checkbox.frame.maxY <= controller.table.enclosingScrollView!.frame.minY,
                          "Sleep checkbox must stay below process list")
@@ -253,7 +253,7 @@ enum ScreenshotUIChecks {
         let detail = longController.tableView(longController.table, viewFor: nil, row: detailRow) as! InlineDetailsCell
         let command = detail.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == longEntry.command }!
         precondition(command.isSelectable && command.maximumNumberOfLines == 3)
-        let showAll = detail.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Показать всё" }!
+        let showAll = detail.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Show all" }!
         precondition(!showAll.isHidden)
         let initialHeight = longController.rows[detailRow].height
         showAll.performClick(nil)

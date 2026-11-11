@@ -13,7 +13,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>ProcessesMenu</string>
   <key>CFBundleIdentifier</key><string>local.processes.menubar</string>
   <key>CFBundleName</key><string>Processes</string>
-  <key>CFBundleDisplayName</key><string>Процессы</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>Processes</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0.0</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -23,4 +24,4 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 codesign --force --sign - "$APP"
-echo "Готово: $PWD/$APP"
+echo "Done: $PWD/$APP"

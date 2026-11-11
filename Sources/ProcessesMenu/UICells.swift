@@ -1,11 +1,24 @@
 import AppKit
 
+/// Center the title optically against the native checkbox glyph.
+@MainActor
+final class AlignedCheckboxCell: NSButtonCell {
+    override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+        super.drawTitle(title, withFrame: frame.offsetBy(dx: 0, dy: controlView.isFlipped ? -1 : 1), in: controlView)
+    }
+}
+
 @MainActor
 class HoverCell: NSTableCellView {
     private var tracking: NSTrackingArea?
     private var forcedHover: Bool?
     private(set) var hovered = false
     override var isFlipped: Bool { true }
+    var isClickable: Bool { true }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isClickable { addCursorRect(visibleRect, cursor: .pointingHand) }
+    }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
@@ -41,6 +54,7 @@ final class SessionHeaderCell: HoverCell {
     let mcpLabel = NSTextField(labelWithString: "")
     private let dotColor: NSColor
     private let expanded: Bool
+    override var isClickable: Bool { !chevron.isHidden }
 
     init(session: AgentSession, expanded: Bool, leftover: Bool = false) {
         self.expanded = expanded
@@ -55,8 +69,8 @@ final class SessionHeaderCell: HoverCell {
         // A session without tasks has nothing to disclose.
         if !session.processes.contains(where: { $0.depth == 0 }) {
             chevron.isHidden = true
-            titleLabel.toolTip = text.string + "\nЗапущенных задач нет"
-            setAccessibilityLabel(text.string + ", задач нет")
+            titleLabel.toolTip = text.string + "\nNo running tasks"
+            setAccessibilityLabel(text.string + ", no tasks")
         }
     }
 
@@ -65,12 +79,12 @@ final class SessionHeaderCell: HoverCell {
         dotColor = .systemGray
         super.init(frame: .zero)
         titleLabel.font = .systemFont(ofSize: 13)
-        titleLabel.stringValue = "Прочие серверы (\(otherCount))"
+        titleLabel.stringValue = "Other servers (\(otherCount))"
         prepare(mcp: [], title: titleLabel.stringValue)
     }
 
     private func prepare(mcp: [AttributedProcess], title: String) {
-        chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: expanded ? "Свернуть" : "Раскрыть")
+        chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: expanded ? "Collapse" : "Expand")
         chevron.symbolConfiguration = .init(pointSize: 10, weight: .medium)
         chevron.contentTintColor = .secondaryLabelColor
         titleLabel.lineBreakMode = .byTruncatingMiddle
@@ -80,8 +94,8 @@ final class SessionHeaderCell: HoverCell {
         mcpLabel.alignment = .center
         let names = mcp.map { "\($0.entry.displayName) · PID \($0.id)" }.joined(separator: "\n")
         mcpLabel.toolTip = names.isEmpty ? nil : names
-        titleLabel.toolTip = title + (names.isEmpty ? "" : "\nMCP:\n" + names) + "\nНажмите, чтобы " + (expanded ? "свернуть" : "раскрыть")
-        setAccessibilityLabel(title + (mcp.isEmpty ? "" : ", MCP \(mcp.count)") + (expanded ? ", раскрыто" : ", свёрнуто"))
+        titleLabel.toolTip = title + (names.isEmpty ? "" : "\nMCP:\n" + names) + "\nClick to " + (expanded ? "collapse" : "expand")
+        setAccessibilityLabel(title + (mcp.isEmpty ? "" : ", MCP \(mcp.count)") + (expanded ? ", expanded" : ", collapsed"))
         for child in [chevron, dot, titleLabel, mcpLabel] { addSubview(child) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -116,7 +130,7 @@ final class UISectionCell: NSTableCellView {
     init(title: String, success: Bool = false, buttonTitle: String? = nil, handler: (() -> Void)? = nil) {
         self.success = success
         self.handler = handler
-        button = buttonTitle.map { NSButton(title: $0, target: nil, action: nil) }
+        button = buttonTitle.map { PointerButton(title: $0, target: nil, action: nil) }
         super.init(frame: .zero)
         label.stringValue = title
         label.font = .systemFont(ofSize: 11, weight: success ? .regular : .semibold)
@@ -152,7 +166,7 @@ final class ProcessCell: HoverCell {
     let icon = NSImageView()
     let nameLabel = NSTextField(labelWithString: "")
     let memoryLabel = NSTextField(labelWithString: "")
-    let stop = NSButton(title: "Остановить", target: nil, action: nil)
+    let stop = PointerButton(title: "Stop", target: nil, action: nil)
     private var ports: [NSButton] = []
     private var leftover = false
     var onStop: (() -> Void)?
@@ -184,7 +198,7 @@ final class ProcessCell: HoverCell {
         ports.forEach { $0.removeFromSuperview() }
         ports = entry.listeningPorts.prefix(3).map { PortButton(port: $0) }
         if entry.listeningPorts.count > 3 {
-            let more = NSButton(title: "+\(entry.listeningPorts.count - 3)", target: self, action: #selector(detailsClicked))
+            let more = PointerButton(title: "+\(entry.listeningPorts.count - 3)", target: self, action: #selector(detailsClicked))
             more.isBordered = false
             more.bezelStyle = .inline
             more.font = .systemFont(ofSize: 12)
@@ -192,11 +206,11 @@ final class ProcessCell: HoverCell {
             ports.append(more)
         }
         ports.forEach { addSubview($0) }
-        stop.title = stopping ? "Остановка…" : "Остановить"
+        stop.title = stopping ? "Stopping…" : "Stop"
         stop.isEnabled = !stopping && entry.canTerminate
         stop.attributedTitle = NSAttributedString(string: stop.title, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: stop.isEnabled ? NSColor.systemRed : NSColor.secondaryLabelColor])
-        stop.setAccessibilityLabel("Остановить \(entry.displayName), PID \(entry.pid)")
-        toolTip = "\(entry.displayName) · PID \(entry.pid)\n\(entry.command)\nНажмите, чтобы раскрыть подробности"
+        stop.setAccessibilityLabel("Stop \(entry.displayName), PID \(entry.pid)")
+        toolTip = "\(entry.displayName) · PID \(entry.pid)\n\(entry.command)\nClick to show details"
         hoverChanged()
         needsLayout = true
     }
@@ -233,7 +247,7 @@ final class ProcessCell: HoverCell {
 }
 
 @MainActor
-final class PortButton: NSButton {
+final class PortButton: PointerButton {
     let port: String
     init(port: String) {
         self.port = port
@@ -245,7 +259,7 @@ final class PortButton: NSButton {
         contentTintColor = .linkColor
         target = self
         action = #selector(openPort)
-        toolTip = "Открыть http://localhost:\(port)"
+        toolTip = "Open http://localhost:\(port)"
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     @objc private func openPort() { Self.open(port) }

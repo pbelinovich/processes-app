@@ -22,15 +22,15 @@ struct ProcessEntry: Identifiable, Sendable {
     var id: pid_t { pid }
     var canTerminate: Bool { pid > 1 && pid != getpid() && uid == getuid() }
     var memoryLabel: String {
-        residentBytes.map { String(format: "%.0f МБ", Double($0) / 1_048_576) } ?? "— МБ"
+        residentBytes.map { String(format: "%.0f MB", Double($0) / 1_048_576) } ?? "— MB"
     }
     var ageLabel: String { Self.durationLabel(seconds: max(0, Int(Date().timeIntervalSince1970) - Int(startedSeconds))) }
 
     static func durationLabel(seconds: Int) -> String {
-        if seconds >= 86400 { return "\(seconds / 86400) д \(seconds % 86400 / 3600) ч" }
-        if seconds >= 3600 { return "\(seconds / 3600) ч \(seconds % 3600 / 60) мин" }
-        if seconds >= 60 { return "\(seconds / 60) мин" }
-        return "\(seconds) с"
+        if seconds >= 86400 { return "\(seconds / 86400) d \(seconds % 86400 / 3600) h" }
+        if seconds >= 3600 { return "\(seconds / 3600) h \(seconds % 3600 / 60) min" }
+        if seconds >= 60 { return "\(seconds / 60) min" }
+        return "\(seconds) s"
     }
 }
 

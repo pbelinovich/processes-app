@@ -73,7 +73,7 @@ enum SleepControlChecks {
             try await control.setDisabled(true)
             fatalError("Cancelled authorization must fail")
         } catch SleepControl.Failure.command(let message) {
-            precondition(message.contains("отменена"))
+            precondition(message.contains("canceled"))
         }
         let afterCancel = try await control.read()
         precondition(!afterCancel)

@@ -14,7 +14,7 @@ struct SleepControl: Sendable {
         var errorDescription: String? {
             switch self {
             case .command(let text): text
-            case .verification: "macOS не применила настройку сна."
+            case .verification: "macOS did not apply the sleep setting."
             }
         }
     }
@@ -59,7 +59,7 @@ struct SleepControl: Sendable {
                 .replacingOccurrences(of: "\"", with: "\\\"") + "\" with administrator privileges"
             let install = try await run("/usr/bin/osascript", ["-e", appleScript])
             guard install.status == 0 else {
-                throw Failure.command(install.output.contains("-128") ? "Настройка доступа отменена. Настройка сна не изменена." : install.output)
+                throw Failure.command(install.output.contains("-128") ? "Access setup was canceled. The sleep setting was not changed." : install.output)
             }
             result = try await run("/usr/bin/sudo", arguments)
         }

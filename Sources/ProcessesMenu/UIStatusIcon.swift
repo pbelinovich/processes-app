@@ -3,7 +3,7 @@ import AppKit
 @MainActor
 enum StatusIcon {
     static func make(color: NSColor, sleepDisabled: Bool) -> NSImage? {
-        guard let pulse = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Процессы")?
+        guard let pulse = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Processes")?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) else { return nil }
         pulse.isTemplate = false
         // Both states must be ordinary images with identical alignment metadata.

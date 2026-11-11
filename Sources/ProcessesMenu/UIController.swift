@@ -28,14 +28,13 @@ enum ProcessRow {
 final class ProcessListController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     let search = NSSearchField()
     let table = NSTableView()
-    let tabs = NSSegmentedControl(labels: ["Агенты", "Все процессы"], trackingMode: .selectOne, target: nil, action: nil)
-    private let status = NSTextField(labelWithString: "Загрузка…")
+    let tabs = PointerSegmentedControl(labels: ["Agents", "All processes"], trackingMode: .selectOne, target: nil, action: nil)
+    private let status = NSTextField(labelWithString: "Loading…")
     private let scroll = NSScrollView()
     let systemSummary = SystemSummaryView()
     private var systemTask: Task<Void, Never>?
     private var panelIsOpen = false
-    let preventSleep = NSButton(checkboxWithTitle: "Не усыплять Mac при закрытой крышке", target: nil, action: nil)
-    private let sleepNote = NSTextField(labelWithString: "Действует и после выхода. Снимите галочку, чтобы вернуть сон.")
+    let preventSleep = PointerButton(checkboxWithTitle: "Keep Mac awake with the lid closed", target: nil, action: nil)
     private let sleepControl = SleepControl()
     private var sleepTask: Task<Void, Never>?
     private var snapshot: AttributedSnapshot = .empty
@@ -66,27 +65,26 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         tabs.target = self
         tabs.action = #selector(filtersChanged)
         tabs.segmentStyle = .rounded
-        search.placeholderString = "Имя, порт, проект или PID"
+        search.placeholderString = "Name, port, project, or PID"
         search.delegate = self
         search.sendsSearchStringImmediately = true
-        let refresh = NSButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Обновить")!, target: self, action: #selector(refreshNow))
+        let refresh = PointerButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")!, target: self, action: #selector(refreshNow))
         refresh.bezelStyle = .rounded
         refresh.controlSize = .regular
-        refresh.toolTip = "Обновить сейчас"
-        let quit = NSButton(title: "Выйти", target: NSApp, action: #selector(NSApplication.terminate(_:)))
+        refresh.toolTip = "Refresh now"
+        let quit = PointerButton(title: "Quit", target: NSApp, action: #selector(NSApplication.terminate(_:)))
         quit.bezelStyle = .rounded
         quit.controlSize = .small
         quit.font = .systemFont(ofSize: 11)
         FooterTextStyle.apply(to: status)
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        preventSleep.cell = AlignedCheckboxCell(textCell: preventSleep.title)
+        preventSleep.setButtonType(.switch)
         preventSleep.target = self
         preventSleep.action = #selector(togglePreventSleep)
         preventSleep.font = .systemFont(ofSize: 12)
         preventSleep.isEnabled = false
-        preventSleep.toolTip = "При первом изменении macOS запросит пароль администратора для настройки доступа. Дальше — без пароля. Работает от сети и батареи. Не кладите работающий Mac в сумку."
-        sleepNote.font = .systemFont(ofSize: 10)
-        sleepNote.textColor = .secondaryLabelColor
-        sleepNote.lineBreakMode = .byTruncatingTail
+        preventSleep.toolTip = "The first change requires an administrator password to set up access. Later changes need no password. Works on power and battery. Do not put an awake Mac in a bag."
         let column = NSTableColumn(identifier: .init("process"))
         column.width = 560
         table.addTableColumn(column)
@@ -109,7 +107,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         scroll.documentView = table
         let separator = NSBox()
         separator.boxType = .separator
-        for child in [tabs, search, refresh, scroll, separator, systemSummary, preventSleep, sleepNote, status, quit] {
+        for child in [tabs, search, refresh, scroll, separator, systemSummary, preventSleep, status, quit] {
             child.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(child)
         }
@@ -132,7 +130,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             scroll.bottomAnchor.constraint(equalTo: separator.topAnchor),
             separator.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -83),
+            separator.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -65),
             systemSummary.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
             systemSummary.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
             systemSummary.trailingAnchor.constraint(equalTo: quit.leadingAnchor, constant: -8),
@@ -140,9 +138,6 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             preventSleep.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
             preventSleep.trailingAnchor.constraint(lessThanOrEqualTo: tabs.trailingAnchor),
             preventSleep.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
-            sleepNote.leadingAnchor.constraint(equalTo: tabs.leadingAnchor, constant: 18),
-            sleepNote.trailingAnchor.constraint(lessThanOrEqualTo: tabs.trailingAnchor),
-            sleepNote.topAnchor.constraint(equalTo: preventSleep.bottomAnchor, constant: 2),
             status.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
             status.bottomAnchor.constraint(equalTo: systemSummary.topAnchor, constant: -2),
             status.trailingAnchor.constraint(lessThanOrEqualTo: quit.leadingAnchor, constant: -8),
@@ -163,13 +158,11 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
                 preventSleep.state = disabled ? .on : .off
                 preventSleep.isEnabled = true
                 onSleepState?(disabled)
-                sleepNote.stringValue = "Действует и после выхода. Снимите галочку, чтобы вернуть сон."
-                sleepNote.toolTip = nil
             } catch {
                 self?.onSleepState?(nil)
                 self?.preventSleep.isEnabled = false
-                self?.sleepNote.stringValue = "Не удалось прочитать настройку сна. Откройте окно повторно."
-                self?.sleepNote.toolTip = error.localizedDescription
+                self?.statusMessage = "Could not read the sleep setting. Reopen this window."
+                self?.rebuildRows()
             }
             self?.sleepTask = nil
         }
@@ -191,9 +184,8 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     func setPreventSleepDisabled(_ disabled: Bool, onError: ((String) -> Void)? = nil) {
         guard sleepTask == nil else { return }
         preventSleep.isEnabled = false
-        sleepNote.stringValue = "Изменение настройки сна…"
         sleepTask = Task { [weak self, sleepControl] in
-            var message = "Действует и после выхода. Снимите галочку, чтобы вернуть сон."
+            var message: String?
             var failure: String?
             do {
                 try await sleepControl.setDisabled(disabled)
@@ -210,11 +202,13 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             } catch {
                 onSleepState?(nil)
                 preventSleep.isEnabled = false
-                message = "Не удалось проверить настройку сна: \(error.localizedDescription)"
+                message = "Could not verify the sleep setting: \(error.localizedDescription)"
                 failure = message
             }
-            sleepNote.stringValue = message
-            sleepNote.toolTip = message
+            if let message {
+                statusMessage = message
+                rebuildRows()
+            }
             sleepTask = nil
             if let failure { onError?(failure) }
         }
@@ -367,7 +361,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
                 rows.append(.leftovers(count))
                 for session in snapshot.leftoverSessions where !matchingProcesses(session).isEmpty { appendSession(session, leftover: true) }
             } else if query.isEmpty && snapshot.leftoverCount == 0 {
-                rows.append(.message("Агенты ничего не оставили ✓"))
+                rows.append(.message("No processes left behind by agents ✓"))
             }
             let ordered = snapshot.liveSessions.enumerated().sorted {
                 let l = $0.element.uiPriority, r = $1.element.uiPriority
@@ -382,13 +376,13 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
                 if expanded { for item in other { appendProcess(item, session: nil) } }
             }
         }
-        if rows.isEmpty { rows = [.message("Ничего не найдено")] }
+        if rows.isEmpty { rows = [.message("No results found")] }
         status.stringValue = statusMessage ?? (tabs.selectedSegment == 1
-            ? "Процессов: \(snapshot.all.filter { matches($0) }.count) · RSS · каждые 3 с"
-            : "Сессий: \(snapshot.liveSessions.count) · осталось: \(snapshot.leftoverCount) · каждые 3 с")
+            ? "Processes: \(snapshot.all.filter { matches($0) }.count) · RSS · every 3 s"
+            : "Sessions: \(snapshot.liveSessions.count) · left behind: \(snapshot.leftoverCount) · every 3 s")
         status.toolTip = stopErrors ?? status.stringValue
         table.reloadData()
-        let height = min(688, max(368, 170 + rows.reduce(CGFloat.zero) { $0 + $1.height }))
+        let height = min(688, max(368, 152 + rows.reduce(CGFloat.zero) { $0 + $1.height }))
         let size = NSSize(width: 560, height: height)
         if preferredContentSize != size {
             preferredContentSize = size
@@ -415,7 +409,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             cell.onShowAll = { [weak self] in self?.fullCommand.toggle(); self?.rebuildRows() }
             return cell
         case .leftovers(let count):
-            return UISectionCell(title: "⚠ Остались после агентов (\(count))", buttonTitle: "Остановить все") { [weak self] in self?.confirmStopAll() }
+            return UISectionCell(title: "⚠ Left behind by agents (\(count))", buttonTitle: "Stop all") { [weak self] in self?.confirmStopAll() }
         case .session(let session, let expanded, let leftover):
             return SessionHeaderCell(session: session, expanded: expanded, leftover: leftover)
         case .message(let text):
@@ -456,12 +450,12 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         guard !items.isEmpty else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Остановить всё, что осталось после агентов?"
-        alert.informativeText = "Будут остановлены процессы и их дочерние задачи:\n\n" + snapshot.leftoverSessions.flatMap { session in
+        alert.messageText = "Stop all processes left behind by agents?"
+        alert.informativeText = "The following processes and their children will be stopped:\n\n" + snapshot.leftoverSessions.flatMap { session in
             session.processes.filter { $0.depth == 0 }.map { "• \($0.entry.displayName)\($0.entry.listeningPorts.map { " :" + $0 }.joined()) · \(session.kind.displayName) · \(session.uiProjectName) · PID \($0.id)" }
-        }.joined(separator: "\n") + "\n\nЕсли процесс не ответит, он будет завершён принудительно."
-        alert.addButton(withTitle: "Отмена")
-        alert.addButton(withTitle: "Остановить все")
+        }.joined(separator: "\n") + "\n\nUnresponsive processes will be force quit."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Stop all")
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         stopItems(items)
     }
@@ -473,15 +467,15 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         guard !tree.isEmpty else { return }
         stoppingPIDs = Set(items.map(\.id))
         stopErrors = nil
-        statusMessage = "Останавливаем \(items.count)…"
+        statusMessage = "Stopping \(items.count)…"
         rebuildRows()
         stopTask = Task { [weak self] in
             let result = await ProcessService.stop(tree)
             guard let self else { return }
             stoppingPIDs = []
             let total = result.stopped.count + result.killed.count
-            statusMessage = "Остановлено: \(uiProcessCount(total)), \(result.killed.count) принудительно"
-                + (result.failed.isEmpty ? "" : " · ошибок: \(result.failed.count)")
+            statusMessage = "Stopped: \(uiProcessCount(total)), \(result.killed.count) force quit"
+                + (result.failed.isEmpty ? "" : " · errors: \(result.failed.count)")
             stopErrors = result.failed.isEmpty ? nil : result.failed.sorted { $0.key < $1.key }.map { "PID \($0.key): \($0.value)" }.joined(separator: "\n")
             stopTask = nil
             rebuildRows()
@@ -502,9 +496,9 @@ extension SessionState {
     var uiSuffix: String {
         switch self {
         case .active: ""
-        case .ended: " · сессия завершена"
+        case .ended: " · session ended"
         case .host: ""
-        case .idle(let seconds): " · неактивна \(ProcessEntry.durationLabel(seconds: seconds))"
+        case .idle(let seconds): " · idle for \(ProcessEntry.durationLabel(seconds: seconds))"
         }
     }
 }
@@ -524,7 +518,7 @@ extension AgentSession {
     /// Preserve the containing project when a session is rooted in a common subdirectory.
     var uiProjectName: String {
         // The daemon's working directory is incidental; its tasks serve every thread of the app.
-        if state == .host { return "приложение" }
+        if state == .host { return "app" }
         let path = projectPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty, path != "/" else { return "—" }
         if ["frontend", "backend", "client", "server", "web"].contains(projectName) {
@@ -545,14 +539,5 @@ extension AgentSession {
 }
 
 func uiProcessCount(_ count: Int) -> String {
-    let word: String
-    if (11...14).contains(count % 100) { word = "процессов" }
-    else {
-        switch count % 10 {
-        case 1: word = "процесс"
-        case 2...4: word = "процесса"
-        default: word = "процессов"
-        }
-    }
-    return "\(count) " + word
+    "\(count) " + (count == 1 ? "process" : "processes")
 }

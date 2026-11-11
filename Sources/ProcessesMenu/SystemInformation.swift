@@ -12,22 +12,22 @@ struct SystemInformation: Sendable {
     var compactMemoryText: String {
         guard let memoryBytes else { return "—" }
         let gib = Double(1 << 30)
-        return String(format: "%.1f / %.0f ГБ", locale: Locale.current,
+        return String(format: "%.1f / %.0f GB", locale: Locale.current,
                       Double(memoryBytes) / gib, Double(ProcessInfo.processInfo.physicalMemory) / gib)
     }
     var uptimeText: String {
         let minutes = max(0, Int(uptime / 60))
         let days = minutes / 1440
-        return (days > 0 ? "\(days) д " : "") + "\(minutes / 60 % 24) ч \(minutes % 60) мин"
+        return (days > 0 ? "\(days) d " : "") + "\(minutes / 60 % 24) h \(minutes % 60) min"
     }
 
     var menuRows: [(symbol: String, title: String)] {
-        let memory = memoryBytes.map { "\(Self.bytes($0)) из \(Self.bytes(ProcessInfo.processInfo.physicalMemory))" } ?? "—"
+        let memory = memoryBytes.map { "\(Self.bytes($0)) of \(Self.bytes(ProcessInfo.processInfo.physicalMemory))" } ?? "—"
         return [
             ("cpu", "CPU: \(cpuText)"),
-            ("memorychip", "Память: \(memory)"),
-            ("internaldrive", "Свободно на диске: \(diskText)"),
-            ("clock", "Без перезагрузки: \(uptimeText)")
+            ("memorychip", "Memory: \(memory)"),
+            ("internaldrive", "Free disk space: \(diskText)"),
+            ("clock", "Uptime: \(uptimeText)")
         ]
     }
 
@@ -84,6 +84,6 @@ struct SystemInformation: Sendable {
     }
 
     private static func bytes(_ value: UInt64) -> String {
-        Int64(clamping: value).formatted(.byteCount(style: .memory).locale(Locale(identifier: "ru_RU")))
+        Int64(clamping: value).formatted(.byteCount(style: .memory).locale(Locale(identifier: "en_US")))
     }
 }

@@ -6,10 +6,10 @@ final class InlineDetailsCell: NSTableCellView {
     private let item: AttributedProcess
     private let fullCommand: Bool
     private var fields: [(NSTextField, NSTextField, CGFloat)] = []
-    private let more = NSButton(title: "Показать всё", target: nil, action: nil)
-    private let copy = NSButton(title: "Скопировать команду", target: nil, action: nil)
-    private let finder = NSButton(title: "Показать в Finder", target: nil, action: nil)
-    private let stop = NSButton(title: "Остановить", target: nil, action: nil)
+    private let more = PointerButton(title: "Show all", target: nil, action: nil)
+    private let copy = PointerButton(title: "Copy command", target: nil, action: nil)
+    private let finder = PointerButton(title: "Show in Finder", target: nil, action: nil)
+    private let stop = PointerButton(title: "Stop", target: nil, action: nil)
     private var open: NSButton?
     var onStop: (() -> Void)?
     var onShowAll: (() -> Void)?
@@ -34,14 +34,14 @@ final class InlineDetailsCell: NSTableCellView {
         self.fullCommand = fullCommand
         super.init(frame: .zero)
         let entry = item.entry
-        addField("Папка", entry.workingDirectory.isEmpty ? "Недоступна" : entry.workingDirectory, height: max(16, Self.textHeight(entry.workingDirectory, font: .systemFont(ofSize: 12))))
-        addField("Команда", entry.command.isEmpty ? "Недоступна" : entry.command, height: Self.commandHeight(item, full: fullCommand), mono: true)
+        addField("Folder", entry.workingDirectory.isEmpty ? "Unavailable" : entry.workingDirectory, height: max(16, Self.textHeight(entry.workingDirectory, font: .systemFont(ofSize: 12))))
+        addField("Command", entry.command.isEmpty ? "Unavailable" : entry.command, height: Self.commandHeight(item, full: fullCommand), mono: true)
         addField("PID / PPID", "\(entry.pid) / \(entry.parentPID)", height: 16)
         let ports = entry.listeningPorts.map { ":" + $0 }.joined(separator: ", ")
-        addField("Порты", ports.isEmpty ? "—" : ports, height: max(16, Self.textHeight(ports, font: .systemFont(ofSize: 12))))
-        addField("Дерево", uiProcessCount(item.tree.count), height: 16)
+        addField("Ports", ports.isEmpty ? "—" : ports, height: max(16, Self.textHeight(ports, font: .systemFont(ofSize: 12))))
+        addField("Tree", uiProcessCount(item.tree.count), height: 16)
         fields.last?.1.toolTip = item.tree.map { "\($0.displayName) · PID \($0.pid) ← \($0.parentPID)" }.joined(separator: "\n")
-        more.title = fullCommand ? "Свернуть команду" : "Показать всё"
+        more.title = fullCommand ? "Collapse command" : "Show all"
         more.isBordered = false
         more.font = .systemFont(ofSize: 11)
         more.alignment = .left
@@ -51,7 +51,7 @@ final class InlineDetailsCell: NSTableCellView {
         more.isHidden = Self.commandHeight(item, full: true) <= 46
         addSubview(more)
         if let port = entry.listeningPorts.first {
-            let button = NSButton(title: "Открыть :\(port)", target: self, action: #selector(openPort))
+            let button = PointerButton(title: "Open :\(port)", target: self, action: #selector(openPort))
             open = button
             addSubview(button)
         }

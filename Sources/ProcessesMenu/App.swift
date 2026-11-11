@@ -9,13 +9,13 @@ enum ProcessesMenuApp {
             do {
                 try SMAppService.mainApp.register()
                 guard SMAppService.mainApp.status == .enabled else {
-                    fputs("Разрешите автозагрузку в Системных настройках → Основные → Объекты входа.\n", stderr)
+                    fputs("Allow launch at login in System Settings → General → Login Items.\n", stderr)
                     exit(1)
                 }
-                print("Автозагрузка включена: \(Bundle.main.bundleURL.path)")
+                print("Launch at login enabled: \(Bundle.main.bundleURL.path)")
                 return
             } catch {
-                fputs("Не удалось включить автозагрузку: \(error.localizedDescription)\n", stderr)
+                fputs("Could not enable launch at login: \(error.localizedDescription)\n", stderr)
                 exit(1)
             }
         }
@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var localEventMonitor: Any?
     private var globalEventMonitor: Any?
     private let quickMenu = NSMenu()
-    private let quickSleepItem = NSMenuItem(title: "Не усыплять Mac", action: nil, keyEquivalent: "")
+    private let quickSleepItem = NSMenuItem(title: "Keep Mac awake", action: nil, keyEquivalent: "")
     private var quickMenuTask: Task<Void, Never>?
 
     /// Status bars ignore contentTintColor for template symbols once the button has a title,
@@ -54,8 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .foregroundColor: color,
             .font: NSFont.menuBarFont(ofSize: 0)
         ])
-        let tasks = leftoverCount > 0 ? "Остались после агентов: \(leftoverCount)" : "Процессы · агенты ничего не оставили"
-        let sleep = sleepDisabled.map { $0 ? "Сон Mac отключён" : "Обычный сон Mac" } ?? "Состояние сна неизвестно"
+        let tasks = leftoverCount > 0 ? "Left behind by agents: \(leftoverCount)" : "Processes · no processes left behind by agents"
+        let sleep = sleepDisabled.map { $0 ? "Mac sleep disabled" : "Normal Mac sleep" } ?? "Sleep status unknown"
         button.toolTip = tasks + "\n" + sleep
         button.setAccessibilityLabel(button.toolTip)
     }
@@ -69,14 +69,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         updateButton()
         item.button?.target = self
         item.button?.action = #selector(toggle)
-        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        item.button?.sendAction(on: [.leftMouseDown, .rightMouseUp])
         quickMenu.autoenablesItems = false
         quickSleepItem.target = self
         quickSleepItem.action = #selector(toggleSleepFromMenu)
         quickSleepItem.isEnabled = false
         quickMenu.addItem(quickSleepItem)
-        // A transient popover may close on mouse-down before the button's action,
-        // causing that same click to reopen it. Own dismissal so each click toggles once.
+        // Handle left clicks on mouse-down and own dismissal, so closing the
+        // popover cannot turn the same click into another open on mouse-up.
         popover.behavior = .applicationDefined
         popover.contentViewController = controller
         popover.delegate = self
@@ -109,8 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 guard let self, self.popover.isShown else { return }
                 // On newer macOS the system can route menu-bar events through another
                 // process. The status button still owns toggling clicks in its bounds.
-                if let button = self.item.button, let window = button.window,
-                   window.convertToScreen(button.convert(button.bounds, to: nil)).contains(NSEvent.mouseLocation) { return }
+                if self.isOverStatusButton { return }
                 self.popover.performClose(nil)
             }
         }
@@ -119,11 +118,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func isInsidePopoverOrButton(_ event: NSEvent) -> Bool {
         if controller.isViewLoaded, let window = controller.view.window, event.window === window { return true }
-        guard let button = item.button, event.window === button.window else { return false }
-        return button.bounds.contains(button.convert(event.locationInWindow, from: nil))
+        return isOverStatusButton
     }
 
-    func applicationDidResignActive(_ notification: Notification) { popover.performClose(nil) }
+    private var isOverStatusButton: Bool {
+        guard let button = item?.button, let window = button.window else { return false }
+        return window.convertToScreen(button.convert(button.bounds, to: nil)).contains(NSEvent.mouseLocation)
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        // Clicking the menu bar can deactivate the app before the button action.
+        // Keep the popover open until that action handles the same click.
+        if isOverStatusButton && NSEvent.pressedMouseButtons != 0 { return }
+        popover.performClose(nil)
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let localEventMonitor { NSEvent.removeMonitor(localEventMonitor) }
@@ -168,7 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 quickMenu.addItem(menuItem)
             }
             quickMenu.addItem(.separator())
-            let quitItem = NSMenuItem(title: "Выйти", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+            let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
             quitItem.target = NSApp
             quickMenu.addItem(quitItem)
             // Let the status item place its menu below the menu bar. Positioning a
@@ -186,7 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             // Serialize with any background state read started while the menu tracked.
             await controller.prepareSleepMenu()
             guard controller.preventSleep.isEnabled else {
-                showSleepError("Не удалось прочитать настройку сна. Попробуйте ещё раз.")
+                showSleepError("Could not read the sleep setting. Try again.")
                 return
             }
             controller.setPreventSleepDisabled(controller.preventSleep.state != .on) { [weak self] message in
@@ -197,7 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showSleepError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "Не удалось изменить настройку сна"
+        alert.messageText = "Could not change the sleep setting"
         alert.informativeText = message
         alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)

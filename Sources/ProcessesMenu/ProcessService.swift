@@ -248,8 +248,8 @@ enum ProcessService {
         case forbidden, gone
         var errorDescription: String? {
             switch self {
-            case .forbidden: "Этот процесс нельзя завершить из приложения."
-            case .gone: "Процесс уже завершился или был заменён другим. Обновите список."
+            case .forbidden: "This process cannot be stopped from the app."
+            case .gone: "The process has already exited or been replaced. Refresh the list."
             }
         }
     }
