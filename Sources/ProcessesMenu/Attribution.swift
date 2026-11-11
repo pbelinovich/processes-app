@@ -116,7 +116,10 @@ enum Attribution {
             let file = identity.marker.flatMap { filesBySession[$0] }
             let state: SessionState
             if let agent = identity.agent {
-                if isCodexDaemon(agent) {
+                if isCodexDaemon(agent) && identity.marker == nil {
+                    // Unmarked children (e.g. MCP pools) belong to the daemon and live as long as it does.
+                    state = .host
+                } else if isCodexDaemon(agent) {
                     // A daemon's existence says nothing about a particular thread's activity.
                     let age = file.map { max(0, now.timeIntervalSince($0.modifiedAt)) }
                     // No file means unknown idle duration; never manufacture a last-active time.
@@ -136,7 +139,7 @@ enum Attribution {
                                        agentPID: identity.agent?.pid, projectPath: project == "/" ? "" : project,
                                        startedSeconds: ([identity.agent].compactMap { $0 } + entries).map(\.startedSeconds).min() ?? 0,
                                        state: state, processes: items)
-            if state == .active { live.append(session) }
+            if state == .active || (state == .host && !items.isEmpty) { live.append(session) }
             else if !items.isEmpty { leftover.append(session) }
         }
         let other = processes.filter { !isApplicationProcess($0) && !assigned.contains($0.pid) && !$0.listeningPorts.isEmpty }

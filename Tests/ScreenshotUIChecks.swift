@@ -192,6 +192,12 @@ enum ScreenshotUIChecks {
         precondition(defaults.rows.contains { if case .session(let session, let expanded, _) = $0 { return session.id == original.id && expanded }; return false }, "Initial disclosure state must survive changes to session processes")
         controller.activateRow(sessionRow("live-codex"))
         precondition(processIDs().contains(91_004))
+        let emptyRow = sessionRow("live-empty")
+        let emptyRows = controller.rows.count
+        controller.activateRow(emptyRow)
+        precondition(controller.rows.count == emptyRows, "Sessions without tasks do not toggle")
+        let emptyCell = controller.tableView(controller.table, viewFor: nil, row: emptyRow) as! SessionHeaderCell
+        precondition(emptyCell.chevron.isHidden, "Sessions without tasks have no disclosure chevron")
         controller.receive(fixture)
         precondition(processIDs().contains(91_004), "Expansion must survive snapshots")
         controller.activateRow(sessionRow("live-vite"))

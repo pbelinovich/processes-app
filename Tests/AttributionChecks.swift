@@ -59,6 +59,13 @@ enum AttributionChecks {
         precondition(boundary.liveSessions.isEmpty && boundary.leftoverSessions[0].state == .idle(seconds: 600))
         let missingFile = Attribution.build(from: daemonTree, now: now)
         precondition(missingFile.liveSessions.isEmpty && missingFile.leftoverSessions.count == 1)
+        let daemonPool = Attribution.build(from: [daemonTree[0],
+            entry(302, "npm exec", parent: 300, command: "npm exec @playwright/mcp --headless")], now: now)
+        precondition(daemonPool.leftoverSessions.isEmpty && daemonPool.leftoverCount == 0, "Daemon-owned MCP pools are not leftovers")
+        precondition(daemonPool.liveSessions.count == 1 && daemonPool.liveSessions[0].state == .host)
+        precondition(daemonPool.liveSessions[0].processes.map(\.entry.pid) == [302] && daemonPool.liveSessions[0].processes[0].role == .mcp)
+        let idleDaemon = Attribution.build(from: [daemonTree[0]], now: now)
+        precondition(idleDaemon.liveSessions.isEmpty && idleDaemon.leftoverSessions.isEmpty, "A daemon without tasks is not a session row")
         let noAgent = Attribution.build(from: Array(daemonTree.dropFirst()), now: now,
                                         sessionFiles: [codex: .init(modifiedAt: now)])
         precondition(noAgent.liveSessions.isEmpty && noAgent.leftoverSessions[0].state == .ended)

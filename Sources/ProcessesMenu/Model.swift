@@ -79,6 +79,7 @@ enum SessionState: Sendable, Equatable {
     case active                 // agent process alive and (for daemon threads) recently active
     case idle(seconds: Int)     // agent host alive but this session quiet for a long time (e.g. Codex desktop thread)
     case ended                  // no agent process for this session any more
+    case host                   // owned by a live agent host (Codex app daemon) itself, not by one of its threads
 }
 
 struct AgentSession: Identifiable, Sendable {
@@ -98,9 +99,9 @@ struct AgentSession: Identifiable, Sendable {
 }
 
 struct AttributedSnapshot: Sendable {
-    /// Sessions whose agent is still working (state == .active).
+    /// Sessions whose agent is still working (state == .active or .host).
     let liveSessions: [AgentSession]
-    /// Sessions in .ended or .idle state that still have processes: what was left behind. Shown first in the UI.
+    /// Sessions in .ended or .idle state (never .host) that still have processes: what was left behind. Shown first in the UI.
     let leftoverSessions: [AgentSession]
     /// Listening servers not attributed to any agent (the owner's own dev servers, system services).
     let otherServers: [AttributedProcess]

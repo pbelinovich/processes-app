@@ -52,6 +52,12 @@ final class SessionHeaderCell: HoverCell {
         text.append(NSAttributedString(string: " · " + age + session.state.uiSuffix, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
         titleLabel.attributedStringValue = text
         prepare(mcp: session.uiMCPProcesses, title: text.string)
+        // A session without tasks has nothing to disclose.
+        if !session.processes.contains(where: { $0.depth == 0 }) {
+            chevron.isHidden = true
+            titleLabel.toolTip = text.string + "\nЗапущенных задач нет"
+            setAccessibilityLabel(text.string + ", задач нет")
+        }
     }
 
     init(otherCount: Int, expanded: Bool) {

@@ -284,8 +284,8 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         let size = NSSize(width: 560, height: height)
         if preferredContentSize != size {
             preferredContentSize = size
-            view.setFrameSize(size)
-            onContentSize?(size)
+            // Inside a popover the host owns the view frame; resizing it here detaches the view from the popover.
+            if let onContentSize { onContentSize(size) } else { view.setFrameSize(size) }
         }
     }
 
@@ -328,6 +328,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             else { searchOtherExpanded = !expanded }
             rebuildRows()
         case .session(let session, let expanded, _):
+            guard session.processes.contains(where: { $0.depth == 0 }) else { return }
             if search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { expandedSessions[session.id] = !expanded }
             else { searchDisclosure[session.id] = !expanded }
             rebuildRows()
@@ -394,6 +395,7 @@ extension SessionState {
         switch self {
         case .active: ""
         case .ended: " · сессия завершена"
+        case .host: ""
         case .idle(let seconds): " · неактивна \(ProcessEntry.durationLabel(seconds: seconds))"
         }
     }
@@ -413,6 +415,8 @@ final class UIBackgroundView: NSView {
 extension AgentSession {
     /// Preserve the containing project when a session is rooted in a common subdirectory.
     var uiProjectName: String {
+        // The daemon's working directory is incidental; its tasks serve every thread of the app.
+        if state == .host { return "приложение" }
         let path = projectPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty, path != "/" else { return "—" }
         if ["frontend", "backend", "client", "server", "web"].contains(projectName) {
