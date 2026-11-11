@@ -53,6 +53,8 @@ enum ScreenshotUIChecks {
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             controller.view.appearance = window.appearance
             controller.receive(snapshot)
+            controller.systemSummary.update(SystemInformation(cpuPercent: 23, memoryBytes: 10_737_418_240,
+                                                              freeDiskBytes: 137_438_953_472, uptime: 98_040))
             controller.selectTab(all ? 1 : 0)
             controller.setQuery(query)
             if let expandedPID { controller.toggleProcess(expandedPID) }
@@ -153,8 +155,24 @@ enum ScreenshotUIChecks {
                 let rect = cell.convert(cell.bounds, to: controller.view)
                 try cache(controller.view, name: "process-expanded-crop", rect: rect)
             }
+            let checkbox = controller.preventSleep
+            precondition(controller.view.bounds.contains(controller.systemSummary.frame))
+            precondition(controller.systemSummary.frame.maxY < checkbox.frame.minY,
+                         "System summary must stay in the footer below sleep controls")
+            let summaryLabel = controller.systemSummary.subviews.compactMap { $0 as? NSTextField }.first!
+            let statusLabel = controller.view.subviews.compactMap { $0 as? NSTextField }.first {
+                $0.stringValue.hasPrefix("Сессий:") || $0.stringValue.hasPrefix("Процессов:")
+            }!
+            precondition(statusLabel.frame.minY >= controller.systemSummary.frame.maxY + 2,
+                         "Process status must be above the CPU summary in the footer")
+            precondition(summaryLabel.intrinsicContentSize.width <= controller.systemSummary.bounds.width,
+                         "System summary must fit alongside the Quit button")
+            precondition(checkbox.title == "Не усыплять Mac при закрытой крышке")
+            precondition(controller.view.bounds.contains(checkbox.frame), "Sleep checkbox must fit the popover")
+            precondition(checkbox.frame.maxY <= controller.table.enclosingScrollView!.frame.minY,
+                         "Sleep checkbox must stay below process list")
             overlay?.removeFromSuperview()
-            precondition(!window.isVisible && (320...640).contains(controller.preferredContentSize.height))
+            precondition(!window.isVisible && (368...688).contains(controller.preferredContentSize.height))
             print("PASS: offscreen \(name) → \(output)/\(name).png")
             withExtendedLifetime(window) {}
         }
@@ -240,7 +258,7 @@ enum ScreenshotUIChecks {
         let initialHeight = longController.rows[detailRow].height
         showAll.performClick(nil)
         precondition(longController.rows[detailRow].height > initialHeight, "Show all expands the full command inline")
-        precondition(longController.preferredContentSize.height == 640, "Long details cap the window and scroll")
+        precondition(longController.preferredContentSize.height == 688, "Long details cap the window and scroll")
         try render("command-preview-dark", snapshot: longSnapshot, expandedPID: 91_020)
         try render("command-full-dark", snapshot: longSnapshot, expandedPID: 91_020, fullCommand: true)
         controller.selectTab(1)
@@ -248,7 +266,7 @@ enum ScreenshotUIChecks {
         precondition(processIDs() == [91_001, 91_002], "All processes retains session project context")
         controller.setQuery("no-such-fixture")
         precondition(processIDs().isEmpty)
-        precondition(controller.preferredContentSize.height == 320, "Empty lists shrink to minimum height")
+        precondition(controller.preferredContentSize.height == 368, "Empty lists shrink to minimum height")
         precondition(app.windows.allSatisfy { !$0.isVisible }, "No windows may be shown")
         print("PASS: persistent session disclosure, one inline process, search and content sizing")
     }

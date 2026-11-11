@@ -31,6 +31,13 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     let tabs = NSSegmentedControl(labels: ["Агенты", "Все процессы"], trackingMode: .selectOne, target: nil, action: nil)
     private let status = NSTextField(labelWithString: "Загрузка…")
     private let scroll = NSScrollView()
+    let systemSummary = SystemSummaryView()
+    private var systemTask: Task<Void, Never>?
+    private var panelIsOpen = false
+    let preventSleep = NSButton(checkboxWithTitle: "Не усыплять Mac при закрытой крышке", target: nil, action: nil)
+    private let sleepNote = NSTextField(labelWithString: "Действует и после выхода. Снимите галочку, чтобы вернуть сон.")
+    private let sleepControl = SleepControl()
+    private var sleepTask: Task<Void, Never>?
     private var snapshot: AttributedSnapshot = .empty
     private var projectByPID: [pid_t: String] = [:]
     private(set) var rows: [ProcessRow] = []
@@ -50,6 +57,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     private var fullCommand = false
     var onContentSize: ((NSSize) -> Void)?
     var onSnapshot: ((AttributedSnapshot) -> Void)?
+    var onSleepState: ((Bool?) -> Void)?
 
     override func loadView() {
         view = UIBackgroundView(frame: NSRect(x: 0, y: 0, width: 560, height: 640))
@@ -69,10 +77,16 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         quit.bezelStyle = .rounded
         quit.controlSize = .small
         quit.font = .systemFont(ofSize: 11)
-        status.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        status.textColor = .secondaryLabelColor
-        status.lineBreakMode = .byTruncatingTail
+        FooterTextStyle.apply(to: status)
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        preventSleep.target = self
+        preventSleep.action = #selector(togglePreventSleep)
+        preventSleep.font = .systemFont(ofSize: 12)
+        preventSleep.isEnabled = false
+        preventSleep.toolTip = "При первом изменении macOS запросит пароль администратора для настройки доступа. Дальше — без пароля. Работает от сети и батареи. Не кладите работающий Mac в сумку."
+        sleepNote.font = .systemFont(ofSize: 10)
+        sleepNote.textColor = .secondaryLabelColor
+        sleepNote.lineBreakMode = .byTruncatingTail
         let column = NSTableColumn(identifier: .init("process"))
         column.width = 560
         table.addTableColumn(column)
@@ -95,7 +109,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
         scroll.documentView = table
         let separator = NSBox()
         separator.boxType = .separator
-        for child in [tabs, search, refresh, scroll, separator, status, quit] {
+        for child in [tabs, search, refresh, scroll, separator, systemSummary, preventSleep, sleepNote, status, quit] {
             child.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(child)
         }
@@ -118,16 +132,92 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             scroll.bottomAnchor.constraint(equalTo: separator.topAnchor),
             separator.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -35),
+            separator.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -83),
+            systemSummary.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
+            systemSummary.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
+            systemSummary.trailingAnchor.constraint(equalTo: quit.leadingAnchor, constant: -8),
+            systemSummary.heightAnchor.constraint(equalToConstant: 14),
+            preventSleep.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
+            preventSleep.trailingAnchor.constraint(lessThanOrEqualTo: tabs.trailingAnchor),
+            preventSleep.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
+            sleepNote.leadingAnchor.constraint(equalTo: tabs.leadingAnchor, constant: 18),
+            sleepNote.trailingAnchor.constraint(lessThanOrEqualTo: tabs.trailingAnchor),
+            sleepNote.topAnchor.constraint(equalTo: preventSleep.bottomAnchor, constant: 2),
             status.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
-            status.centerYAnchor.constraint(equalTo: quit.centerYAnchor),
+            status.bottomAnchor.constraint(equalTo: systemSummary.topAnchor, constant: -2),
             status.trailingAnchor.constraint(lessThanOrEqualTo: quit.leadingAnchor, constant: -8),
             quit.trailingAnchor.constraint(equalTo: tabs.trailingAnchor),
-            quit.centerYAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
+            quit.centerYAnchor.constraint(equalTo: view.bottomAnchor, constant: -22),
             quit.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
             quit.heightAnchor.constraint(equalToConstant: 24)
         ])
         rebuildRows()
+    }
+
+    private func refreshSleepState() {
+        guard sleepTask == nil else { return }
+        sleepTask = Task { [weak self, sleepControl] in
+            do {
+                let disabled = try await sleepControl.read()
+                guard let self else { return }
+                preventSleep.state = disabled ? .on : .off
+                preventSleep.isEnabled = true
+                onSleepState?(disabled)
+                sleepNote.stringValue = "Действует и после выхода. Снимите галочку, чтобы вернуть сон."
+                sleepNote.toolTip = nil
+            } catch {
+                self?.onSleepState?(nil)
+                self?.preventSleep.isEnabled = false
+                self?.sleepNote.stringValue = "Не удалось прочитать настройку сна. Откройте окно повторно."
+                self?.sleepNote.toolTip = error.localizedDescription
+            }
+            self?.sleepTask = nil
+        }
+    }
+
+    @objc private func togglePreventSleep() {
+        let disabled = preventSleep.state == .on
+        // Show confirmed state until authorization and read-back succeed.
+        preventSleep.state = disabled ? .off : .on
+        setPreventSleepDisabled(disabled)
+    }
+
+    func prepareSleepMenu() async {
+        _ = view
+        refreshSleepState()
+        await sleepTask?.value
+    }
+
+    func setPreventSleepDisabled(_ disabled: Bool, onError: ((String) -> Void)? = nil) {
+        guard sleepTask == nil else { return }
+        preventSleep.isEnabled = false
+        sleepNote.stringValue = "Изменение настройки сна…"
+        sleepTask = Task { [weak self, sleepControl] in
+            var message = "Действует и после выхода. Снимите галочку, чтобы вернуть сон."
+            var failure: String?
+            do {
+                try await sleepControl.setDisabled(disabled)
+            } catch {
+                message = error.localizedDescription
+                failure = message
+            }
+            guard let self else { return }
+            do {
+                let confirmedDisabled = try await sleepControl.read()
+                preventSleep.state = confirmedDisabled ? .on : .off
+                preventSleep.isEnabled = true
+                onSleepState?(confirmedDisabled)
+            } catch {
+                onSleepState?(nil)
+                preventSleep.isEnabled = false
+                message = "Не удалось проверить настройку сна: \(error.localizedDescription)"
+                failure = message
+            }
+            sleepNote.stringValue = message
+            sleepNote.toolTip = message
+            sleepTask = nil
+            if let failure { onError?(failure) }
+        }
     }
 
     func startBackgroundUpdating() {
@@ -138,12 +228,17 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
 
     func startUpdating() {
         _ = view
+        panelIsOpen = true
+        refreshSleepState()
         scheduleRefresh(every: 3)
         refreshNow()
         view.window?.makeFirstResponder(search)
     }
 
     func stopUpdating() {
+        panelIsOpen = false
+        systemTask?.cancel()
+        systemTask = nil
         timer?.invalidate()
         timer = nil
         if backgroundUpdates { scheduleRefresh(every: 15) }
@@ -160,18 +255,31 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     @objc func refreshNow() {
+        refreshSleepState()
         refreshTask?.cancel()
         refreshTask = nil
         refreshIfNeeded()
     }
 
     private func refreshIfNeeded() {
+        if panelIsOpen { refreshSystemInformation() }
         guard refreshTask == nil else { return }
+        refreshSleepState()
         refreshTask = Task { [weak self] in
             let result = await Task.detached(priority: .utility) { Attribution.snapshot() }.value
             guard !Task.isCancelled, let self else { return }
             receive(result)
             refreshTask = nil
+        }
+    }
+
+    private func refreshSystemInformation() {
+        guard systemTask == nil else { return }
+        systemTask = Task { [weak self] in
+            let information = await SystemInformation.read()
+            guard !Task.isCancelled, let self else { return }
+            systemSummary.update(information)
+            systemTask = nil
         }
     }
 
@@ -280,7 +388,7 @@ final class ProcessListController: NSViewController, NSTableViewDataSource, NSTa
             : "Сессий: \(snapshot.liveSessions.count) · осталось: \(snapshot.leftoverCount) · каждые 3 с")
         status.toolTip = stopErrors ?? status.stringValue
         table.reloadData()
-        let height = min(640, max(320, 122 + rows.reduce(CGFloat.zero) { $0 + $1.height }))
+        let height = min(688, max(368, 170 + rows.reduce(CGFloat.zero) { $0 + $1.height }))
         let size = NSSize(width: 560, height: height)
         if preferredContentSize != size {
             preferredContentSize = size
